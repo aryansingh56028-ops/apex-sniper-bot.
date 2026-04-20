@@ -25,6 +25,9 @@ HOUSE_MONEY_MULTIPLIER = 1.5
 
 # ── Per-Symbol Config (🔄 INVERTED STRATEGY MULTIPLIERS) ──────────────────────
 PER_SYMBOL_CONFIG = {
+# ── Per-Symbol Config (🔄 INVERTED STRATEGY MULTIPLIERS) ──────────────────────
+# Format: 'Symbol': (SL_MULT, TP_MULT, TRAIL_DIST, P1_RISK, P2_RISK)
+PER_SYMBOL_CONFIG = {
     # ── Group 1: SL=0.50× | TP=3.00× | Trail=0.10× | P1=$30 | P2=$20 ─────────
     'ETH/USDT:USDT':    (0.50, 3.00, 0.10, 30.0, 20.0),
     'OP/USDT:USDT':     (0.50, 3.00, 0.10, 30.0, 20.0),
@@ -44,6 +47,8 @@ PER_SYMBOL_CONFIG = {
     'PIPPIN/USDT:USDT':   (0.45, 4.00, 0.10, 35.0, 25.0),
     'POL/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
     'DASH/USDT:USDT':     (0.45, 4.00, 0.10, 35.0, 25.0),
+    'HYPE/USDT:USDT':     (0.45, 4.00, 0.10, 35.0, 25.0), # 🛡️ NEW: Trade Spreader
+    'SUI/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0), # 🎯 NEW: High Quality
 }
 
 SYMBOLS = list(PER_SYMBOL_CONFIG.keys())
