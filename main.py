@@ -6,9 +6,9 @@ import schedule
 import time
 from datetime import datetime, timezone, date
 
-# ── Credentials & Config ───────────────────────────────────────────────────────
-BYBIT_API_KEY    = "jImaJiIeKBjAQW9z3W"
-BYBIT_API_SECRET = "YBinRS6gX355mnRmiRCCwo2rRVQUGMo3pgSu"
+# ── Credentials & Config (RESTORED V7.2 KEYS) ──────────────────────────────────
+BYBIT_API_KEY    = "FOqGNCN6gRxu4bqMqF"
+BYBIT_API_SECRET = "YmSWYNkQbVXYiFU5v0G3y3R405VLREGu7icy"
 
 TELEGRAM_BOT_TOKEN = "8734785957:AAGzU-KPRY4mzXARxyTpLSHGemFtJ7AEsUQ"
 TELEGRAM_CHAT_ID   = "1932328527"
