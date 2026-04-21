@@ -254,14 +254,16 @@ def sync_open_positions():
 def manage_trailing_stops():
     if not open_positions: return
     for symbol, pos in list(open_positions.items()):
-        # ⚡ UPGRADE: Fetch 1-minute data instead of 15-minute to catch exact wicks
+        # ⚡ Fetch 1-minute data instead of 15-minute to catch exact wicks
         df = fetch_data(symbol, '1m', 5)
         if df is None or len(df) < 1: continue
 
-        # ⚡ UPGRADE: Use iloc[-1] to track the LIVE breathing candle
+        # ⚡ Track the LIVE breathing candle
         live_bar   = df.iloc[-1]
         high_now   = float(live_bar['high'])
         low_now    = float(live_bar['low'])
+        live_price = float(live_bar['close']) # 🔴 NEW: The absolute live current price
+        
         is_long    = pos['direction'] == 'LONG'
         trail_dist = pos['trail_mult'] * pos['atr']
 
@@ -285,6 +287,13 @@ def manage_trailing_stops():
 
         if not sl_improved: continue
 
+        # 🛡️ THE UPGRADE: LIVE PRICE SANITY CHECK
+        # Before spamming Bybit, check if the flash-wick already reversed!
+        if is_long and raw_new_sl >= live_price:
+            continue  # Price dumped too fast. Bybit will reject. Wait silently.
+        if not is_long and raw_new_sl <= live_price:
+            continue  # Price pumped too fast. Bybit will reject. Wait silently.
+
         fmt_new_sl = modify_bybit_tpsl(symbol, pos['direction'], raw_new_sl, pos['catastrophic_tp'])
         if fmt_new_sl:
             pos['current_sl'] = fmt_new_sl
@@ -296,7 +305,7 @@ def manage_trailing_stops():
 
 # ── Fast Management Loop ───────────────────────────────────────────────────────
 def fast_management():
-    # ⚡ UPGRADE: Decoupled function runs every 1 minute
+    # ⚡ Decoupled function runs every 1 minute
     sync_open_positions()
     manage_trailing_stops()
 
@@ -428,11 +437,11 @@ if __name__ == '__main__':
         "ST=2/14 | WMA=14 | EMA=3 | ATR=14\n"
         "🪤 LIQUIDITY SWEEP (SMC INVERSION) ACTIVE\n"
         f"🔥 HOUSE MONEY (1.5x) ACTIVE\n"
-        "⚡ 1-Minute Live Fast-Trailing Engine ENGAGED"
+        "⚡ 1-Minute Live Fast-Trailing Engine (Sanity Check Patched) ENGAGED"
     )
     check_signal()
     
-    # ⚡ UPGRADE: The Decoupled 1-Minute Position Loop
+    # ⚡ The Decoupled 1-Minute Position Loop
     schedule.every(1).minutes.do(fast_management)
     
     # The Original 5-Minute Entry Loop
