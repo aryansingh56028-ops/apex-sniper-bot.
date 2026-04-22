@@ -280,7 +280,8 @@ def manage_trailing_stops():
             pos['trailing_tp_triggered'] = True
             send_telegram(f"🚀 <b>TRAILING TP ACTIVATED — {symbol.split('/')[0]}</b>\nTarget smashed! Uncapped 0.10x trail active.")
 
-        if profit_distance < (0.25 * pos['atr']): continue
+        # ⚡ UPGRADE: Wait for +1.0 ATR profit before aggressively trailing
+        if profit_distance < (1.0 * pos['atr']): continue
 
         raw_new_sl  = (new_best - trail_dist) if is_long else (new_best + trail_dist)
         sl_improved = raw_new_sl > pos['current_sl'] if is_long else raw_new_sl < pos['current_sl']
