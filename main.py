@@ -13,6 +13,9 @@ BYBIT_API_SECRET = "YmSWYNkQbVXYiFU5v0G3y3R405VLREGu7icy"
 TELEGRAM_BOT_TOKEN = "8734785957:AAGzU-KPRY4mzXARxyTpLSHGemFtJ7AEsUQ"
 TELEGRAM_CHAT_ID   = "1932328527"
 
+# ── Replit Webhook Config ──────────────────────────────────────────────────────
+REPLIT_WEBHOOK_URL = "https://dcf37de3-95b1-4275-aad3-54160dffeae5-00-1dydpq6kaysyl.riker.replit.dev/api/webhook/trade" 
+
 CURRENT_PHASE     = 1        
 DAILY_KILL_SWITCH = -150.0   
 DAILY_PROFIT_LOCK = +9999.0  # 🚀 LIFTED
@@ -86,6 +89,14 @@ def send_telegram(text):
         )
     except Exception as e:
         print(f"  [Telegram error] {e}")
+
+# ── Webhook Sender ─────────────────────────────────────────────────────────────
+def send_webhook(data):
+    if not REPLIT_WEBHOOK_URL: return
+    try:
+        requests.post(REPLIT_WEBHOOK_URL, json=data, timeout=5)
+    except Exception as e:
+        print(f"  [Webhook error] {e}")
 
 # ── Safety Check Helpers ───────────────────────────────────────────────────────
 def is_kill_switch_active() -> bool:
@@ -239,6 +250,29 @@ def sync_open_positions():
                 if records:
                     exact_pnl = float(records[0].get('closedPnl', 0.0))
                     record_closed_pnl(exact_pnl)
+                    
+                    # 🔴 REPLIT DASHBOARD WEBHOOK PAYLOAD 🔴
+                    if exact_pnl > 0.50:
+                        trade_outcome = "WIN"
+                    elif exact_pnl < -0.50:
+                        trade_outcome = "LOSS"
+                    else:
+                        trade_outcome = "BREAKEVEN"
+                        
+                    iso_timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+                    
+                    trade_data = {
+                        "timestamp": iso_timestamp,
+                        "asset": sym,
+                        "direction": pos['direction'],
+                        "entry": float(pos['entry']),
+                        "outcome": trade_outcome,
+                        "strategy": "Liquidity Sweep",
+                        "pnl": exact_pnl
+                    }
+                    send_webhook(trade_data)
+                    # 🔴 -------------------------------- 🔴
+
                     emoji = "✅" if exact_pnl > 0 else "❌"
                     msg = f"{emoji} <b>TRADE CLOSED — {sym.split('/')[0]}</b>\nSettled Net PnL: <code>${exact_pnl:.2f}</code>"
                     send_telegram(msg)
