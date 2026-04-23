@@ -49,6 +49,8 @@ PER_SYMBOL_CONFIG = {
     'POL/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
     'DASH/USDT:USDT':     (0.45, 4.00, 0.10, 35.0, 25.0),
     'SUI/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
+    'JASMY/USDT:USDT':    (0.45, 4.00, 0.10, 35.0, 25.0),
+
 }
 
 SYMBOLS = list(PER_SYMBOL_CONFIG.keys())
