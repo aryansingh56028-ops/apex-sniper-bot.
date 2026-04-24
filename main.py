@@ -7,8 +7,8 @@ import time
 from datetime import datetime, timezone, date
 
 # ── Credentials & Config (DEMO KEYS INTEGRATED) ────────────────────────────────
-BYBIT_API_KEY    = "FOqGNCN6gRxu4bqMqF"
-BYBIT_API_SECRET = "YmSWYNkQbVXYiFU5v0G3y3R405VLREGu7icy"
+BYBIT_API_KEY    = "uaYuCtuHQrPj6vuKEi"
+BYBIT_API_SECRET = "Y2aouZ6fGHv9AqWgNl9WdqWLKTEZlP8OqVCe"
 
 TELEGRAM_BOT_TOKEN = "8734785957:AAGzU-KPRY4mzXARxyTpLSHGemFtJ7AEsUQ"
 TELEGRAM_CHAT_ID   = "1932328527"               
