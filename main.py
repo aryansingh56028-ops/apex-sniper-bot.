@@ -47,12 +47,14 @@ PER_SYMBOL_CONFIG = {
     'EIGEN/USDT:USDT':  (1.00, 1.00, 0.10, 30.0, 20.0),
     'BNB/USDT:USDT':    (1.00, 1.00, 0.10, 30.0, 20.0),
     'APE/USDT:USDT':    (1.00, 1.00, 0.10, 30.0, 20.0),
+    'COAI/USDT:USDT':   (1.00, 1.00, 0.10, 30.0, 20.0),
+    'DUSK/USDT:USDT':   (1.00, 1.00, 0.10, 30.0, 20.0),
     'KAT/USDT:USDT':    (1.00, 1.00, 0.10, 30.0, 20.0),
 }
 
 SYMBOLS = list(PER_SYMBOL_CONFIG.keys())
 
-# ── AlgoAlpha Indicator Constants (v7.2 APEX OPTIMAL) ──────────────────────────
+# ── AlgoAlpha Indicator Constants (v7.2 APEX OPTIMAL) ─────────────────────DUSK─────
 ST_FACTOR  = 2.0    
 ST_PERIOD  = 14     
 WMA_LENGTH = 14     
@@ -424,7 +426,7 @@ def daily_reset():
 if __name__ == '__main__':
     send_telegram(
         f"<b>🔄 APEX SANDBOX (V7.2.8) Online</b>\n"
-        "20 Symbols | Market Orders\n\n"
+        "22 Symbols | Market Orders\n\n"
         f"Kill-Switch ${DAILY_KILL_SWITCH}/day | Profit-Lock LIFTED 🚀\n"
         "ST=2/14 | WMA=14 | EMA=3 | ATR=14\n"
         "🔀 EXECUTION ALIGNED (INVERTED PARITY)\n"
