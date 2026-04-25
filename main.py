@@ -23,32 +23,31 @@ FEE_CAP_FRAC      = 0.40
 HOUSE_MONEY_THRESHOLD  = 75.0  
 HOUSE_MONEY_MULTIPLIER = 1.5   
 
-# ── Per-Symbol Config (RESTORED TO YOUR PREVIOUS SETTINGS) ─────────────────────
+# ── Per-Symbol Config (UPDATED TO SPECIFIC SL & TRAILING TP TRIGGERS) ─────────
+# Tuple format: (sl_mult, tp_mult, trail_mult, p1_risk, p2_risk)
 PER_SYMBOL_CONFIG = {
-    # ── Group 1: Custom SL | TP=3.00× | Trail=0.10× | P1=$30 | P2=$20 ─────────
-    'ETH/USDT:USDT':    (1.00, 3.00, 0.10, 30.0, 20.0),
-    'XRP/USDT:USDT':    (1.00, 3.00, 0.10, 30.0, 20.0),
-    'OP/USDT:USDT':     (1.00, 3.00, 0.10, 30.0, 20.0),
-    'SOL/USDT:USDT':    (2.00, 3.00, 0.10, 30.0, 20.0),
-    'ONDO/USDT:USDT':   (1.00, 3.00, 0.10, 30.0, 20.0),
-    'ZEC/USDT:USDT':    (2.00, 3.00, 0.10, 30.0, 20.0),
-    'LTC/USDT:USDT':    (2.00, 3.00, 0.10, 30.0, 20.0),
-    'ADA/USDT:USDT':    (1.00, 3.00, 0.10, 30.0, 20.0),
-    'LINK/USDT:USDT':   (1.00, 3.00, 0.10, 30.0, 20.0),
-    'WLFI/USDT:USDT':   (1.00, 3.00, 0.10, 30.0, 20.0),
+    'ETH/USDT:USDT':    (1.00, 2.00, 0.10, 30.0, 20.0),
+    'OP/USDT:USDT':     (1.00, 1.00, 0.10, 30.0, 20.0),
+    'SOL/USDT:USDT':    (2.00, 1.00, 0.10, 30.0, 20.0),
+    'ONDO/USDT:USDT':   (1.00, 1.00, 0.10, 30.0, 20.0),
+    'AAVE/USDT:USDT':   (1.00, 1.00, 0.10, 30.0, 20.0),
+    'ZEC/USDT:USDT':    (2.00, 2.00, 0.10, 30.0, 20.0),
+    'LTC/USDT:USDT':    (1.00, 2.00, 0.10, 30.0, 20.0),
+    'ADA/USDT:USDT':    (1.00, 1.00, 0.10, 30.0, 20.0),
+    'LINK/USDT:USDT':   (1.00, 1.00, 0.10, 30.0, 20.0),
+    'WLFI/USDT:USDT':   (1.00, 2.00, 0.10, 30.0, 20.0),
+    'RONIN/USDT:USDT':  (1.00, 1.00, 0.10, 30.0, 20.0),
     
-    # ── Group 2: SL=0.45× | TP=4.00× | Trail=0.10× | P1=$35 | P2=$25 ─────────
-    'RIVER/USDT:USDT':    (0.45, 4.00, 0.10, 35.0, 25.0),
-    'RENDER/USDT:USDT':   (0.45, 4.00, 0.10, 35.0, 25.0),
-    '1000PEPE/USDT:USDT': (0.45, 4.00, 0.10, 35.0, 25.0),
-    'AVAX/USDT:USDT':     (0.45, 4.00, 0.10, 35.0, 25.0),
-    'INJ/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
-    'JUP/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
-    'PIPPIN/USDT:USDT':   (0.45, 4.00, 0.10, 35.0, 25.0),
-    'POL/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
-    'DASH/USDT:USDT':     (0.45, 4.00, 0.10, 35.0, 25.0),
-    'JASMY/USDT:USDT':    (0.45, 4.00, 0.10, 35.0, 25.0),
-    'SUI/USDT:USDT':      (0.45, 4.00, 0.10, 35.0, 25.0),
+    'RIVER/USDT:USDT':  (0.45, 4.00, 0.10, 35.0, 25.0), # TP Unchanged
+    'RENDER/USDT:USDT': (0.45, 4.00, 0.10, 35.0, 25.0), # Unchanged
+    'JUP/USDT:USDT':    (0.45, 4.00, 0.10, 35.0, 25.0), # Unchanged
+    'SUI/USDT:USDT':    (0.45, 4.00, 0.10, 35.0, 25.0), # Unchanged
+    
+    'JASMY/USDT:USDT':  (1.00, 1.00, 0.10, 35.0, 25.0),
+    'EIGEN/USDT:USDT':  (1.00, 1.00, 0.10, 30.0, 20.0),
+    'BNB/USDT:USDT':    (1.00, 1.00, 0.10, 30.0, 20.0),
+    'APE/USDT:USDT':    (1.00, 1.00, 0.10, 30.0, 20.0),
+    'KAT/USDT:USDT':    (1.00, 1.00, 0.10, 30.0, 20.0),
 }
 
 SYMBOLS = list(PER_SYMBOL_CONFIG.keys())
@@ -425,7 +424,7 @@ def daily_reset():
 if __name__ == '__main__':
     send_telegram(
         f"<b>🔄 APEX SANDBOX (V7.2.8) Online</b>\n"
-        "21 Symbols | Market Orders\n\n"
+        "20 Symbols | Market Orders\n\n"
         f"Kill-Switch ${DAILY_KILL_SWITCH}/day | Profit-Lock LIFTED 🚀\n"
         "ST=2/14 | WMA=14 | EMA=3 | ATR=14\n"
         "🔀 EXECUTION ALIGNED (INVERTED PARITY)\n"
