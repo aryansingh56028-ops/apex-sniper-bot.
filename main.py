@@ -35,7 +35,7 @@ PER_SYMBOL_CONFIG = {
     'LTC/USDT:USDT':    (2.00, 3.00, 0.10, 30.0, 20.0),
     'ADA/USDT:USDT':    (1.00, 3.00, 0.10, 30.0, 20.0),
     'LINK/USDT:USDT':   (1.00, 3.00, 0.10, 30.0, 20.0),
-    'WLF/USDT:USDT':    (1.00, 3.00, 0.10, 30.0, 20.0),
+    'WLFI/USDT:USDT':   (1.00, 3.00, 0.10, 30.0, 20.0),
     
     # ── Group 2: SL=0.45× | TP=4.00× | Trail=0.10× | P1=$35 | P2=$25 ─────────
     'RIVER/USDT:USDT':    (0.45, 4.00, 0.10, 35.0, 25.0),
@@ -279,6 +279,7 @@ def manage_trailing_stops():
             pos['trailing_tp_triggered'] = True
             send_telegram(f"🚀 <b>TRAILING TP ACTIVATED — {symbol.split('/')[0]}</b>\nTarget smashed! Uncapped 0.10x trail active.")
 
+        # === THE CAPTURE LOGIC BUFFER ===
         if profit_distance < (1.0 * pos['atr']): continue
 
         raw_new_sl  = (new_best - trail_dist) if is_long else (new_best + trail_dist)
@@ -286,6 +287,7 @@ def manage_trailing_stops():
 
         if not sl_improved: continue
 
+        # === THE LIVE PRICE SANITY CHECK ===
         if is_long and raw_new_sl >= live_price:
             continue  
         if not is_long and raw_new_sl <= live_price:
