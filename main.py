@@ -23,8 +23,8 @@ FEE_CAP_FRAC      = 0.40
 # 🔥 HOUSE MONEY & RADAR CONFIG
 HOUSE_MONEY_THRESHOLD  = 60.0  
 HOUSE_MONEY_MULTIPLIER = 1.5   
-RADAR_MIN_VOLUME       = 15000000  
-RADAR_TOP_COINS        = 5         
+RADAR_MIN_VOLUME       = 10000000  # Lowered to 10M for wider net
+RADAR_TOP_COINS        = 15        # Increased to 15 to get more trades safely
 P1_RISK = 25.0                     
 P2_RISK = 25.0
 
@@ -72,7 +72,7 @@ def record_closed_pnl(pnl_usd: float):
 
 # ── 🧠 CONTINUOUS MARKET RADAR ─────────────────────────────────────
 def scan_market_radar():
-    print("📡 [RADAR] Sweeping Bybit for Top 5 active momentum targets...")
+    print("📡 [RADAR] Sweeping Bybit for Top 15 active momentum targets...")
     try:
         now = time.time()
         expired = [sym for sym, expiry in edge_cooldowns.items() if now > expiry]
@@ -388,7 +388,14 @@ def check_signal():
             for e in [9, 15, 20, 21, 50, 200]: df[f'ema_{e}'] = df['close'].ewm(span=e, adjust=False).mean()
             
             opt_sl_m, mode, exp, wr = calculate_historical_edge(df, min_trades=100)
-            if not opt_sl_m: edge_cooldowns[symbol] = time.time() + 14400; continue
+            
+            # ── 🔥 The Burn Book & Print Monologue ──
+            if not opt_sl_m: 
+                print(f"  🚫 {symbol.split('/')[0]} FAILED: Expectancy too low. Sent to Burn Book.")
+                edge_cooldowns[symbol] = time.time() + 3600  # 1 Hour cooldown
+                continue
+            
+            print(f"  🌟 {symbol.split('/')[0]} APPROVED! Mode: {mode} | Exp: +{exp:.2f}R | WR: {wr:.1f}%")
             approved_coins[symbol] = {'mult': opt_sl_m, 'mode': mode, 'exp': exp, 'wr': wr}
 
         df['atr_14'] = calc_atr(df, ATR_PERIOD)
@@ -397,9 +404,17 @@ def check_signal():
         df['rsi_14'] = calc_rsi(df['close'])
         for e in [9, 15, 20, 21, 50, 200]: df[f'ema_{e}'] = df['close'].ewm(span=e, adjust=False).mean()
         
+        # ── 🔥 Volume Surge Calculation ──
+        df['vol_ma'] = df['volume'].rolling(window=20).mean()
+        
         c15m, price = df.iloc[-2], float(df.iloc[-1]['close'])
         atr, smc_t, bar_ts = float(c15m['atr_14']), int(c15m['smc_trend']), int(c15m['ts'])
         if last_trade_bar.get(symbol) == bar_ts: continue
+
+        # Volume Logic: Current closed candle volume must be > 1.2x the 20-period average
+        current_vol = float(c15m['volume'])
+        avg_vol = float(c15m['vol_ma'])
+        volume_surge = current_vol > (avg_vol * 1.2)
 
         algo_l = (float(df['tL'].iloc[-2]) > float(df['tL'].iloc[-3])) and (float(df['tL'].iloc[-3]) <= float(df['tL'].iloc[-4]))
         algo_s = (float(df['tL'].iloc[-2]) < float(df['tL'].iloc[-3])) and (float(df['tL'].iloc[-3]) >= float(df['tL'].iloc[-4]))
@@ -423,6 +438,10 @@ def check_signal():
         elif mode == 'Regime 3 (Standard + RSI Exhaustion)': l_sig, s_sig = l_std and (rsi < 40), s_std and (rsi > 60)
         elif mode == 'Regime 4 (Inverted + RSI Exhaustion)': l_sig, s_sig = l_inv and (rsi < 40), s_inv and (rsi > 60)
 
+        # ── Apply the Volume Filter to ALL signals ──
+        l_sig = l_sig and volume_surge
+        s_sig = s_sig and volume_surge
+
         if not l_sig and not s_sig: continue
         
         risk_usd = (P1_RISK if CURRENT_PHASE == 1 else P2_RISK) * (HOUSE_MONEY_MULTIPLIER if today_pnl >= HOUSE_MONEY_THRESHOLD else 1.0)
@@ -443,6 +462,11 @@ def daily_reset():
     daily_pnl_tracker.clear(); early_warnings.clear(); edge_cooldowns.clear(); approved_coins.clear()
 
 if __name__ == '__main__':
+    # ── 🔥 Telegram Boot Message ──
+    boot_msg = "🤖 <b>Apex Beast V8.0 is ONLINE</b>\n\n📡 Scanning Top 15 Coins...\n🔥 Burn Book Cooldown: 1 Hour\n📊 Volume Surge Filter: Active (1.2x)\n💰 Prop Firm Mode: Locked"
+    send_telegram(boot_msg)
+    print("🚀 Bot booted up. Startup message sent to Telegram.")
+    
     check_signal()
     schedule.every(1).minutes.do(fast_management)
     schedule.every(5).minutes.at(":00").do(check_signal) 
