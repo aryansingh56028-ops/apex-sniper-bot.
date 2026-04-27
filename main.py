@@ -16,15 +16,15 @@ TELEGRAM_CHAT_ID   = "1932328527"
 
 CURRENT_PHASE     = 1        
 # ── Prop Firm 5k Calibration ──
-DAILY_KILL_SWITCH = -180.0   # $180 max daily loss (Leaves $70 buffer for the $250 limit)
+DAILY_KILL_SWITCH = -180.0   
 MAX_CONCURRENT    = 5        
 FEE_CAP_FRAC      = 0.40     
 
 # 🔥 HOUSE MONEY & RADAR CONFIG
 HOUSE_MONEY_THRESHOLD  = 60.0  
 HOUSE_MONEY_MULTIPLIER = 1.5   
-RADAR_MIN_VOLUME       = 10000000  # Lowered to 10M for wider net
-RADAR_TOP_COINS        = 15        # Increased to 15 to get more trades safely
+RADAR_MIN_VOLUME       = 10000000  
+RADAR_TOP_COINS        = 15        
 P1_RISK = 25.0                     
 P2_RISK = 25.0
 
@@ -72,7 +72,7 @@ def record_closed_pnl(pnl_usd: float):
 
 # ── 🧠 CONTINUOUS MARKET RADAR ─────────────────────────────────────
 def scan_market_radar():
-    print("📡 [RADAR] Sweeping Bybit for Top 15 active momentum targets...")
+    print(f"📡 [RADAR] Sweeping Bybit for Top {RADAR_TOP_COINS} active targets...")
     try:
         now = time.time()
         expired = [sym for sym, expiry in edge_cooldowns.items() if now > expiry]
@@ -174,20 +174,17 @@ def calculate_historical_edge(df, min_trades=100):
     l_std, s_std = algo_l & (smc_t == 1), algo_s & (smc_t == -1)
     l_inv, s_inv = algo_s & (smc_t == -1), algo_l & (smc_t == 1)
 
-    # Base Regimes
     regimes = {
         'Regime 1 (Pure Standard)': (l_std, s_std),
         'Regime 2 (Pure Inverted)': (l_inv, s_inv)
     }
     
-    # Grid Search: Regimes 3 & 4 with EMAs
     emas = [9, 15, 20, 21, 50, 200]
     for e in emas:
         ema_col = df[f'ema_{e}'].shift(1)
         regimes[f'Regime 3 (Standard + {e} EMA Sync)'] = (l_std & (close > ema_col), s_std & (close < ema_col))
         regimes[f'Regime 4 (Inverted + {e} EMA Sync)'] = (l_inv & (close > ema_col), s_inv & (close < ema_col))
 
-    # Grid Search: RSI Custom Strategies
     regimes['Regime 3 (Standard + RSI Momentum)'] = (l_std & (rsi > 50), s_std & (rsi < 50))
     regimes['Regime 4 (Inverted + RSI Momentum)'] = (l_inv & (rsi > 50), s_inv & (rsi < 50))
     regimes['Regime 3 (Standard + RSI Exhaustion)'] = (l_std & (rsi < 40), s_std & (rsi > 60))
@@ -198,30 +195,23 @@ def calculate_historical_edge(df, min_trades=100):
     
     for mode_name, (l_sig, s_sig) in regimes.items():
         indices = df.index[l_sig | s_sig].tolist()
-        
         for sl_m in test_multipliers:
             trades = []
-            
             for idx in indices:
                 if idx >= len(df) - 2: continue
                 is_l = l_sig[idx]
                 entry = df['close'].iloc[idx]
                 atr = df['atr_14'].iloc[idx]
-                
                 if pd.isna(atr) or atr == 0: continue
-                
                 sl_dist = atr * sl_m
                 cur_sl = entry - sl_dist if is_l else entry + sl_dist
                 be_price = entry * 1.002 if is_l else entry * 0.998
                 cat_tp = entry + (10.0 * atr) if is_l else entry - (10.0 * atr)
-                
                 best_px = entry
                 be_triggered = False
                 tr_r = 0.0
-                
                 for fwd in range(idx + 1, len(df)):
                     h, l = df['high'].iloc[fwd], df['low'].iloc[fwd]
-                    
                     if is_l:
                         if l <= cur_sl:
                             tr_r = (cur_sl - entry) / sl_dist
@@ -230,13 +220,11 @@ def calculate_historical_edge(df, min_trades=100):
                             tr_r = (cat_tp - entry) / sl_dist
                             break
                         best_px = max(best_px, h)
-                        profit_d = best_px - entry
-                        if profit_d >= sl_dist and not be_triggered:
+                        if (best_px - entry) >= sl_dist and not be_triggered:
                             be_triggered = True
                             cur_sl = max(cur_sl, be_price)
-                        if profit_d >= (sl_dist * 2.0):
-                            trail_p = best_px - (0.10 * atr)
-                            cur_sl = max(cur_sl, trail_p)
+                        if (best_px - entry) >= (sl_dist * 2.0):
+                            cur_sl = max(cur_sl, best_px - (0.10 * atr))
                     else:
                         if h >= cur_sl:
                             tr_r = (entry - cur_sl) / sl_dist
@@ -245,27 +233,20 @@ def calculate_historical_edge(df, min_trades=100):
                             tr_r = (entry - cat_tp) / sl_dist
                             break
                         best_px = min(best_px, l)
-                        profit_d = entry - best_px
-                        if profit_d >= sl_dist and not be_triggered:
+                        if (entry - best_px) >= sl_dist and not be_triggered:
                             be_triggered = True
                             cur_sl = min(cur_sl, be_price)
-                        if profit_d >= (sl_dist * 2.0):
-                            trail_p = best_px + (0.10 * atr)
-                            cur_sl = min(cur_sl, trail_p)
-                            
+                        if (entry - best_px) >= (sl_dist * 2.0):
+                            cur_sl = min(cur_sl, best_px + (0.10 * atr))
                 if tr_r != 0.0: trades.append(tr_r)
-            
             if len(trades) >= min_trades:
                 exp = sum(trades) / len(trades)
                 wr = (sum(1 for t in trades if t > 0.05) / len(trades)) * 100
-                
-                # Prop Firm Dominator Check
                 if exp > 0.25 and exp > best_exp:
                     best_exp, best_mult, best_mode, best_wr = exp, sl_m, mode_name, wr
-                    
     return best_mult, best_mode, best_exp, best_wr
 
-# ── Auto-Leverage & Limit Execution ───────────────────────────────
+# ── Order Monitoring & Execution ──────────────────────────────────
 def set_isolated_and_leverage(symbol, entry_price, sl_price):
     try:
         leverage = max(1, min(math.floor(1 / (abs(entry_price - sl_price) / entry_price * 1.2)), 25))
@@ -296,79 +277,46 @@ def modify_bybit_tpsl(symbol, direction, new_sl, current_tp):
         return f_sl
     except Exception: return None
 
-# ── Order Monitoring (The Ultimate Receipt) ──────────────────────
-def monitor_pending_orders():
-    if not pending_orders: return
+def fast_management():
+    if not pending_orders and not open_positions: return
     try:
+        # Sync Orders
         live_syms = {p['symbol'] for p in exchange.fetch_positions() if float(p.get('contracts', 0)) > 0}
         for sym in list(pending_orders.keys()):
             if sym in live_syms:
                 p = pending_orders.pop(sym)
                 open_positions[sym] = p
-                send_telegram(
-                    f"<b>✅ FILLED — {sym.split('/')[0]}</b>\n"
-                    f"<b>Mode:</b> {p['mode']}\n"
-                    f"<b>Backtest Proof:</b> {p['win_rate']:.1f}% WR | +{p['expectancy']:.2f} R\n\n"
-                    f"<b>Entry:</b> <code>{p['entry']:.5f}</code>\n"
-                    f"<b>SL:</b> <code>{p['current_sl']}</code>\n"
-                    f"<b>Break-Even:</b> <code>{p['be_price']:.5f}</code>\n"
-                    f"<b>Risk:</b> ${p['risk_usd']:.2f}"
-                )
-    except Exception: pass
-
-def cancel_stale_orders():
-    if not pending_orders: return
-    try:
-        for order in exchange.fetch_open_orders():
-            if order['symbol'] in pending_orders and (exchange.milliseconds() - order['timestamp']) > 840000:
-                exchange.cancel_order(order['id'], order['symbol'])
-                pending_orders.pop(order['symbol'], None)
-    except Exception: pass
-
-def sync_open_positions():
-    if not open_positions: return
-    try:
-        live_syms = {p['symbol'] for p in exchange.fetch_positions() if float(p.get('contracts', 0)) > 0}
+                send_telegram(f"✅ <b>FILLED: {sym.split('/')[0]}</b>\n{p['mode']}\nEntry: {p['entry']:.5f}\nSL Mult: {p['opt_sl_m']}x")
+        
+        # Sync Closed
         for sym in list(open_positions.keys()):
             if sym not in live_syms:
                 open_positions.pop(sym)
                 recs = exchange.private_get_v5_position_closed_pnl({'category': 'linear', 'symbol': exchange.market(sym)['id'], 'limit': 1}).get('result', {}).get('list', [])
                 if recs: record_closed_pnl(float(recs[0].get('closedPnl', 0.0)))
+
+        # Trailing
+        for symbol, pos in list(open_positions.items()):
+            df = fetch_data(symbol, '1m', 5)
+            if df is None: continue
+            is_l, entry, sl_dist = pos['direction'] == 'LONG', pos['entry'], pos['sl_distance']
+            best = max(pos['best_price'], float(df.iloc[-1]['high'])) if is_l else min(pos['best_price'], float(df.iloc[-1]['low']))
+            pos['best_price'] = best
+            diff = abs(best - entry)
+            if diff >= sl_dist and not pos.get('be_on', False):
+                pos['be_on'] = True
+                modify_bybit_tpsl(symbol, pos['direction'], pos['be_price'], pos['catastrophic_tp'])
+            if diff >= (sl_dist * 2.0):
+                trail = (best - (0.10 * pos['atr'])) if is_l else (best + (0.10 * pos['atr']))
+                modify_bybit_tpsl(symbol, pos['direction'], trail, pos['catastrophic_tp'])
     except Exception: pass
-
-def manage_trailing_stops():
-    if not open_positions: return
-    for symbol, pos in list(open_positions.items()):
-        df = fetch_data(symbol, '1m', 5)
-        if df is None or len(df) < 1: continue
-        is_l, entry, sl_dist = pos['direction'] == 'LONG', pos['entry'], pos['sl_distance']
-        best = max(pos['best_price'], float(df.iloc[-1]['high'])) if is_l else min(pos['best_price'], float(df.iloc[-1]['low']))
-        pos['best_price'] = best
-        profit_d = abs(best - entry)
-
-        if profit_d >= sl_dist and not pos.get('free_ride_triggered', False):
-            pos['free_ride_triggered'] = True
-            f_sl = modify_bybit_tpsl(symbol, pos['direction'], pos['be_price'], pos['catastrophic_tp'])
-            if f_sl: 
-                pos['current_sl'] = f_sl
-                send_telegram(f"🛡️ <b>FEE-SAFE BE — {symbol.split('/')[0]}</b>\nSL moved to {f_sl}")
-
-        if profit_d >= (sl_dist * 2.0):
-            trail_p = (best - (0.10 * pos['atr'])) if is_l else (best + (0.10 * pos['atr']))
-            if (is_l and trail_p > pos['current_sl']) or (not is_l and trail_p < pos['current_sl']):
-                f_sl = modify_bybit_tpsl(symbol, pos['direction'], trail_p, pos['catastrophic_tp'])
-                if f_sl: pos['current_sl'] = f_sl
-
-def fast_management():
-    monitor_pending_orders(); cancel_stale_orders(); sync_open_positions(); manage_trailing_stops()
 
 # ── Signal Engine ──────────────────────────────────────────────────
 def check_signal():
-    ts_now, today = datetime.now(timezone.utc), datetime.now(timezone.utc).date()
-    today_pnl = daily_pnl_tracker.get(today, 0.0)
     if is_kill_switch_active(): return
     scan_market_radar(); fast_management()
     if len(open_positions) + len(pending_orders) >= MAX_CONCURRENT: return
+    today_pnl = daily_pnl_tracker.get(date.today(), 0.0)
 
     for symbol in active_watchlist:
         if symbol in open_positions or symbol in pending_orders: continue
@@ -377,31 +325,21 @@ def check_signal():
             df = fetch_data(symbol, '15m', 500)
             conf = approved_coins[symbol]
             opt_sl_m, mode, exp, wr = conf['mult'], conf['mode'], conf['exp'], conf['wr']
+            print(f"  🔍 Hunting for {mode} entry on {symbol.split('/')[0]}...")
         else:
             df = fetch_deep_data(symbol, '15m', 6000)
             if df is None or len(df) < 3000: continue
-            
             df['atr_14'] = calc_atr(df, ATR_PERIOD)
             df['tL'] = algoalpha_baseline(df)
             df = calc_smc_structure(df)
             df['rsi_14'] = calc_rsi(df['close'])
             for e in [9, 15, 20, 21, 50, 200]: df[f'ema_{e}'] = df['close'].ewm(span=e, adjust=False).mean()
-            
             opt_sl_m, mode, exp, wr = calculate_historical_edge(df, min_trades=100)
-                   if symbol in approved_coins:
-            df = fetch_data(symbol, '15m', 500)
-            conf = approved_coins[symbol]
-            opt_sl_m, mode, exp, wr = conf['mult'], conf['mode'], conf['exp'], conf['wr']
-            # 👉 ADDED THIS LINE BELOW:
-            print(f"  🔍 Hunting for {mode} entry on {symbol.split('/')[0]}...") 
- 
-            # ── 🔥 The Burn Book & Print Monologue ──
             if not opt_sl_m: 
-                print(f"  🚫 {symbol.split('/')[0]} FAILED: Expectancy too low. Sent to Burn Book.")
-                edge_cooldowns[symbol] = time.time() + 3600  # 1 Hour cooldown
+                print(f"  🚫 {symbol.split('/')[0]} FAILED: Expectancy low. Burned.")
+                edge_cooldowns[symbol] = time.time() + 3600
                 continue
-            
-            print(f"  🌟 {symbol.split('/')[0]} APPROVED! Mode: {mode} | Exp: +{exp:.2f}R | WR: {wr:.1f}%")
+            print(f"  🌟 {symbol.split('/')[0]} APPROVED! Mode: {mode} | SL Mult: {opt_sl_m}x | Exp: +{exp:.2f}R")
             approved_coins[symbol] = {'mult': opt_sl_m, 'mode': mode, 'exp': exp, 'wr': wr}
 
         df['atr_14'] = calc_atr(df, ATR_PERIOD)
@@ -409,73 +347,55 @@ def check_signal():
         df = calc_smc_structure(df)
         df['rsi_14'] = calc_rsi(df['close'])
         for e in [9, 15, 20, 21, 50, 200]: df[f'ema_{e}'] = df['close'].ewm(span=e, adjust=False).mean()
-        
-        # ── 🔥 Volume Surge Calculation ──
         df['vol_ma'] = df['volume'].rolling(window=20).mean()
         
-        c15m, price = df.iloc[-2], float(df.iloc[-1]['close'])
+        c15m = df.iloc[-2]
+        price = float(df.iloc[-1]['close'])
         atr, smc_t, bar_ts = float(c15m['atr_14']), int(c15m['smc_trend']), int(c15m['ts'])
         if last_trade_bar.get(symbol) == bar_ts: continue
 
-        # Volume Logic: Current closed candle volume must be > 1.2x the 20-period average
-        current_vol = float(c15m['volume'])
-        avg_vol = float(c15m['vol_ma'])
-        volume_surge = current_vol > (avg_vol * 1.2)
+        # Volume Surge Filter
+        volume_surge = float(c15m['volume']) > (float(c15m['vol_ma']) * 1.2)
 
         algo_l = (float(df['tL'].iloc[-2]) > float(df['tL'].iloc[-3])) and (float(df['tL'].iloc[-3]) <= float(df['tL'].iloc[-4]))
         algo_s = (float(df['tL'].iloc[-2]) < float(df['tL'].iloc[-3])) and (float(df['tL'].iloc[-3]) >= float(df['tL'].iloc[-4]))
         rsi = float(c15m['rsi_14'])
-
         l_std, s_std = algo_l and (smc_t == 1), algo_s and (smc_t == -1)
         l_inv, s_inv = algo_s and (smc_t == -1), algo_l and (smc_t == 1)
 
         l_sig, s_sig = False, False
-        
         if mode == 'Regime 1 (Pure Standard)': l_sig, s_sig = l_std, s_std
         elif mode == 'Regime 2 (Pure Inverted)': l_sig, s_sig = l_inv, s_inv
-        elif 'Standard +' in mode and 'EMA Sync' in mode:
+        elif 'EMA Sync' in mode:
             e = int(mode.split('+ ')[1].split(' EMA')[0])
-            l_sig, s_sig = l_std and (price > float(c15m[f'ema_{e}'])), s_std and (price < float(c15m[f'ema_{e}']))
-        elif 'Inverted +' in mode and 'EMA Sync' in mode:
-            e = int(mode.split('+ ')[1].split(' EMA')[0])
-            l_sig, s_sig = l_inv and (price > float(c15m[f'ema_{e}'])), s_inv and (price < float(c15m[f'ema_{e}']))
-        elif mode == 'Regime 3 (Standard + RSI Momentum)': l_sig, s_sig = l_std and (rsi > 50), s_std and (rsi < 50)
-        elif mode == 'Regime 4 (Inverted + RSI Momentum)': l_sig, s_sig = l_inv and (rsi > 50), s_inv and (rsi < 50)
-        elif mode == 'Regime 3 (Standard + RSI Exhaustion)': l_sig, s_sig = l_std and (rsi < 40), s_std and (rsi > 60)
-        elif mode == 'Regime 4 (Inverted + RSI Exhaustion)': l_sig, s_sig = l_inv and (rsi < 40), s_inv and (rsi > 60)
+            check = price > float(c15m[f'ema_{e}'])
+            l_sig, s_sig = (l_std if 'Standard' in mode else l_inv) and check, (s_std if 'Standard' in mode else s_inv) and not check
+        elif 'RSI Momentum' in mode:
+            l_sig, s_sig = (l_std if 'Standard' in mode else l_inv) and rsi > 50, (s_std if 'Standard' in mode else s_inv) and rsi < 50
+        elif 'RSI Exhaustion' in mode:
+            l_sig, s_sig = (l_std if 'Standard' in mode else l_inv) and rsi < 40, (s_std if 'Standard' in mode else s_inv) and rsi > 60
 
-        # ── Apply the Volume Filter to ALL signals ──
-        l_sig = l_sig and volume_surge
-        s_sig = s_sig and volume_surge
-
+        l_sig, s_sig = l_sig and volume_surge, s_sig and volume_surge
         if not l_sig and not s_sig: continue
         
-        risk_usd = (P1_RISK if CURRENT_PHASE == 1 else P2_RISK) * (HOUSE_MONEY_MULTIPLIER if today_pnl >= HOUSE_MONEY_THRESHOLD else 1.0)
+        risk = (P1_RISK if CURRENT_PHASE == 1 else P2_RISK) * (HOUSE_MONEY_MULTIPLIER if today_pnl >= HOUSE_MONEY_THRESHOLD else 1.0)
         direction = 'LONG' if l_sig else 'SHORT'
         sl_p = price - (opt_sl_m * atr) if l_sig else price + (opt_sl_m * atr)
         tp_p = price + (10.0 * atr) if l_sig else price - (10.0 * atr)
         sl_d = abs(price - sl_p)
-        be_p = price * 1.002 if l_sig else price * 0.998
         
-        order, f_size, f_sl, f_tp = execute_trade(symbol, direction, risk_usd / sl_d, price, sl_p, tp_p)
+        order, f_size, f_sl, f_tp = execute_trade(symbol, direction, risk / sl_d, price, sl_p, tp_p)
         if order:
             last_trade_bar[symbol] = bar_ts
-            pending_orders[symbol] = {'direction': direction, 'entry': price, 'atr': atr, 'best_price': price, 'current_sl': f_sl, 
-                                      'catastrophic_tp': f_tp, 'sl_distance': sl_d, 'be_price': be_p, 'risk_usd': risk_usd, 
-                                      'mode': mode, 'win_rate': wr, 'expectancy': exp}
-
-def daily_reset():
-    daily_pnl_tracker.clear(); early_warnings.clear(); edge_cooldowns.clear(); approved_coins.clear()
+            pending_orders[symbol] = {'direction': direction, 'entry': price, 'atr': atr, 'best_price': price, 'opt_sl_m': opt_sl_m,
+                                      'current_sl': f_sl, 'catastrophic_tp': f_tp, 'sl_distance': sl_d, 'be_price': price * 1.002 if l_sig else price * 0.998, 
+                                      'risk_usd': risk, 'mode': mode, 'win_rate': wr, 'expectancy': exp}
 
 if __name__ == '__main__':
-    # ── 🔥 Telegram Boot Message ──
-    boot_msg = "🤖 <b>Apex Beast V8.0 is ONLINE</b>\n\n📡 Scanning Top 15 Coins...\n🔥 Burn Book Cooldown: 1 Hour\n📊 Volume Surge Filter: Active (1.2x)\n💰 Prop Firm Mode: Locked"
-    send_telegram(boot_msg)
-    print("🚀 Bot booted up. Startup message sent to Telegram.")
-    
+    send_telegram("🤖 <b>Apex Beast V8.1 is ONLINE</b>\n📡 Scanning Top 15 Coins...\n📊 Volume Surge & Hunter Logs: Active")
     check_signal()
     schedule.every(1).minutes.do(fast_management)
     schedule.every(5).minutes.at(":00").do(check_signal) 
-    schedule.every().day.at("00:05").do(daily_reset)
+    schedule.every().day.at("00:05").do(lambda: (daily_pnl_tracker.clear(), approved_coins.clear(), edge_cooldowns.clear()))
     while True:
         schedule.run_pending(); time.sleep(1)
