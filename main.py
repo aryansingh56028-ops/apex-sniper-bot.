@@ -23,7 +23,7 @@ FEE_CAP_FRAC      = 0.40
 HOUSE_MONEY_THRESHOLD  = 75.0  
 HOUSE_MONEY_MULTIPLIER = 1.5   
 RADAR_MIN_VOLUME       = 15000000  # $15M minimum 24h volume
-RADAR_TOP_COINS        = 10        # How many coins to hunt simultaneously
+RADAR_TOP_COINS        = 5         # Focused on Top 5 for deep backtests
 P1_RISK = 30.0
 P2_RISK = 20.0
 
@@ -33,15 +33,18 @@ ST_PERIOD  = 14
 WMA_LENGTH = 14     
 EMA_LENGTH = 3      
 ATR_PERIOD = 14     
-BYBIT_MAKER_FEE = 0.00020  # Switched to Maker fee since we use Limit Orders
+BYBIT_MAKER_FEE = 0.00020  
 
 # ── Runtime State ──────────────────────────────────────────────────
 open_positions       = {}
-pending_orders       = {}  # Waiting room for 14-min limit orders
-early_warnings       = {}  # Tracks brewing setups to prevent spam
+pending_orders       = {}  
+early_warnings       = {}  
 daily_pnl_tracker    = {}
 last_trade_bar       = {}  
 active_watchlist     = []
+
+edge_cooldowns       = {}  # The Burn Book
+approved_coins       = {}  # Approved coin logic & multipliers
 
 # ── Exchange ───────────────────────────────────────────────────────
 exchange = ccxt.bybit({
@@ -50,7 +53,7 @@ exchange = ccxt.bybit({
     'enableRateLimit': True,
     'options': {'defaultType': 'swap'},
 })
-exchange.enable_demo_trading(True) # NOTE: Turn to False for live funds
+exchange.enable_demo_trading(True) 
 exchange.load_markets()
 
 # ── Telegram ───────────────────────────────────────────────────────
@@ -70,23 +73,27 @@ def record_closed_pnl(pnl_usd: float):
     today = date.today()
     daily_pnl_tracker[today] = daily_pnl_tracker.get(today, 0.0) + pnl_usd
 
-# ── 🧠 CONTINUOUS MARKET RADAR ──────────────────────────────────────
+# ── 🧠 CONTINUOUS MARKET RADAR (CASCADING) ──────────────────────────
 def scan_market_radar():
-    print("📡 [RADAR] Sweeping Bybit USDT Perpetuals for momentum...")
+    print("📡 [RADAR] Sweeping Bybit for Top 5 active momentum targets...")
     try:
+        now = time.time()
+        expired = [sym for sym, expiry in edge_cooldowns.items() if now > expiry]
+        for sym in expired: del edge_cooldowns[sym]
+
         tickers = exchange.fetch_tickers()
         valid_coins = []
         
         for symbol, data in tickers.items():
             if not symbol.endswith(':USDT'): continue
+            if symbol in edge_cooldowns: continue 
             
             quote_volume = float(data.get('quoteVolume', 0))
             last_price = float(data.get('last', 0))
             high_24 = float(data.get('high', 0))
             low_24 = float(data.get('low', 0))
             
-            if last_price == 0 or low_24 == 0: continue
-            if quote_volume < RADAR_MIN_VOLUME: continue
+            if last_price == 0 or low_24 == 0 or quote_volume < RADAR_MIN_VOLUME: continue
             
             volatility_score = (high_24 - low_24) / low_24
             valid_coins.append({'symbol': symbol, 'volatility': volatility_score})
@@ -96,16 +103,33 @@ def scan_market_radar():
         
         global active_watchlist
         active_watchlist = top_coins
-        print(f"🎯 [RADAR LOCK] Tracking Top {len(active_watchlist)} Markets: {[s.split('/')[0] for s in active_watchlist]}")
+        print(f"🎯 [RADAR LOCK] Tracking: {[s.split('/')[0] for s in active_watchlist]}")
         
     except Exception as e:
         print(f"❌ [RADAR ERROR] Market sweep failed: {e}")
 
-# ── Indicators (SMC & AlgoAlpha) ───────────────────────────────────
+# ── Indicators & Data ─────────────────────────────────────────────
 def fetch_data(symbol, timeframe='15m', limit=300):
     try:
         bars = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+        for c in ['open', 'high', 'low', 'close']: df[c] = df[c].astype(float)
+        return df
+    except Exception: return None
+
+def fetch_deep_data(symbol, timeframe='15m', target_limit=6000):
+    try:
+        timeframe_ms = 15 * 60 * 1000
+        since = exchange.milliseconds() - (target_limit * timeframe_ms)
+        all_ohlcv = []
+        while len(all_ohlcv) < target_limit:
+            limit = min(1000, target_limit - len(all_ohlcv))
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            if not ohlcv: break
+            since = ohlcv[-1][0] + 1
+            all_ohlcv.extend(ohlcv)
+            time.sleep(0.1)
+        df = pd.DataFrame(all_ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
         for c in ['open', 'high', 'low', 'close']: df[c] = df[c].astype(float)
         return df
     except Exception: return None
@@ -131,11 +155,9 @@ def algoalpha_baseline(df):
     lower = np.zeros(len(df))
     close = df['close'].values
     upper[0], lower[0] = basic_upper.iloc[0], basic_lower.iloc[0]
-
     for i in range(1, len(df)):
         lower[i] = (basic_lower.iloc[i] if (basic_lower.iloc[i] > lower[i-1] or close[i-1] < lower[i-1]) else lower[i-1])
         upper[i] = (basic_upper.iloc[i] if (basic_upper.iloc[i] < upper[i-1] or close[i-1] > upper[i-1]) else upper[i-1])
-
     mid_line = (pd.Series(lower, index=df.index) + pd.Series(upper, index=df.index)) / 2.0
     return calc_wma(mid_line, WMA_LENGTH).ewm(span=EMA_LENGTH, adjust=False).mean()
 
@@ -143,106 +165,104 @@ def calc_smc_structure(df):
     roll_max = df['high'].rolling(window=7).max()
     is_swing_high = df['high'].shift(3) == roll_max
     df['last_swing_high'] = pd.Series(np.where(is_swing_high, df['high'].shift(3), np.nan)).ffill()
-    
     roll_min = df['low'].rolling(window=7).min()
     is_swing_low = df['low'].shift(3) == roll_min
     df['last_swing_low'] = pd.Series(np.where(is_swing_low, df['low'].shift(3), np.nan)).ffill()
-
     trend = pd.Series(np.nan, index=df.index)
     trend.loc[(df['close'] > df['last_swing_high'])] = 1   
     trend.loc[(df['close'] < df['last_swing_low'])] = -1  
     df['smc_trend'] = trend.ffill().fillna(0)
     return df
 
+# ── 🧠 MIRROR LOGIC DYNAMIC ENGINE ────────────────────────────────
+def calculate_historical_edge(df, min_trades=100):
+    algo_long = (df['tL'].shift(1) > df['tL'].shift(2)) & (df['tL'].shift(2) <= df['tL'].shift(3))
+    algo_short = (df['tL'].shift(1) < df['tL'].shift(2)) & (df['tL'].shift(2) >= df['tL'].shift(3))
+    
+    modes = ['Inverted', 'Standard']
+    test_multipliers = [1.50, 2.00, 2.50, 3.00]
+    best_mult, best_mode, best_exp = None, None, 0.0
+    
+    for mode in modes:
+        if mode == 'Inverted':
+            l_sig = algo_short & (df['smc_trend'].shift(1) == -1)
+            s_sig = algo_long & (df['smc_trend'].shift(1) == 1)
+        else:
+            l_sig = algo_long & (df['smc_trend'].shift(1) == 1)
+            s_sig = algo_short & (df['smc_trend'].shift(1) == -1)
+            
+        indices = df.index[l_sig | s_sig].tolist()
+        for sl_m in test_multipliers:
+            tp_m, trades = sl_m * 2.0, []
+            for idx in indices:
+                if idx >= len(df) - 2: continue
+                is_l, entry, atr = l_sig[idx], df['close'].iloc[idx], df['atr_14'].iloc[idx]
+                if pd.isna(atr) or atr == 0: continue
+                sl_p = entry - (atr * sl_m) if is_l else entry + (atr * sl_m)
+                tp_p = entry + (atr * tp_m) if is_l else entry - (atr * tp_m)
+                tr_r = 0.0
+                for fwd in range(idx + 1, len(df)):
+                    h, l = df['high'].iloc[fwd], df['low'].iloc[fwd]
+                    if is_l:
+                        if l <= sl_p: tr_r = -1.0; break
+                        elif h >= tp_p: tr_r = 2.0; break
+                    else:
+                        if h >= sl_p: tr_r = -1.0; break
+                        elif l <= tp_p: tr_r = 2.0; break
+                if tr_r != 0.0: trades.append(tr_r)
+            if len(trades) >= min_trades:
+                exp = sum(trades) / len(trades)
+                if exp > 0.15 and exp > best_exp:
+                    best_exp, best_mult, best_mode = exp, sl_m, mode
+    return best_mult, best_mode
+
 # ── Auto-Leverage & Margin ─────────────────────────────────────────
 def set_isolated_and_leverage(symbol, entry_price, sl_price):
     try:
         sl_percent = abs(entry_price - sl_price) / entry_price
-        # 1.2 buffer to keep liquidation further away than SL
         safe_leverage = math.floor(1 / (sl_percent * 1.2)) 
         leverage = max(1, min(safe_leverage, 25))
-
         try: exchange.set_margin_mode('isolated', symbol)
         except Exception: pass
-            
         try: exchange.set_leverage(leverage, symbol)
         except Exception: pass
-            
-        print(f"  ⚙️ {symbol.split('/')[0]} Margin: ISOLATED | Auto-Leverage: {leverage}x")
         return leverage
-    except Exception as e:
-        print(f"  [Margin Error] {e}")
-        return 10 
+    except Exception: return 10 
 
-# ── Limit Execution (Maker Fees) ───────────────────────────────────
+# ── Limit Execution ────────────────────────────────────────────────
 def execute_trade(symbol, direction, size, entry, sl, tp):
     side = 'buy' if direction == 'LONG' else 'sell'
     try:
         fmt_size = float(exchange.amount_to_precision(symbol, size))
-        
-        # Strings strictly required by Bybit API for orders
-        fmt_sl   = str(float(exchange.price_to_precision(symbol, sl)))
-        fmt_tp   = str(float(exchange.price_to_precision(symbol, tp)))
+        fmt_sl, fmt_tp = str(float(exchange.price_to_precision(symbol, sl))), str(float(exchange.price_to_precision(symbol, tp)))
         fmt_price = float(exchange.price_to_precision(symbol, entry))
-
         set_isolated_and_leverage(symbol, entry, sl)
-
-        order = exchange.create_order(
-            symbol=symbol, 
-            type='limit',  
-            side=side, 
-            amount=fmt_size,
-            price=fmt_price, 
-            params={
-                'stopLoss': fmt_sl, 
-                'takeProfit': fmt_tp, 
-                'tpslMode': 'Full',
-                'slOrderType': 'Market', 
-                'tpOrderType': 'Market', 
-                'timeInForce': 'GTC'  # Sits in the book waiting for pullback
-            }
-        )
+        order = exchange.create_order(symbol=symbol, type='limit', side=side, amount=fmt_size, price=fmt_price, 
+            params={'stopLoss': fmt_sl, 'takeProfit': fmt_tp, 'tpslMode': 'Full', 'slOrderType': 'Market', 'tpOrderType': 'Market', 'timeInForce': 'GTC'})
         return order, fmt_size, float(fmt_sl), float(fmt_tp)
-    except Exception as e:
-        print(f"❌ Execution Failed ({symbol}): {e}")
-        return None, None, None, None
+    except Exception: return None, None, None, None
 
 def modify_bybit_tpsl(symbol, direction, new_sl, current_tp):
     market_id = exchange.market(symbol)['id']
     bybit_side = 'Buy' if direction == 'LONG' else 'Sell'
     try:
         fmt_sl = float(exchange.price_to_precision(symbol, new_sl))
-        exchange.privatePostV5PositionTradingStop({
-            'category': 'linear', 'symbol': market_id, 'side': bybit_side, 'tpslMode': 'Full',
-            'takeProfit': str(current_tp), 'stopLoss': str(fmt_sl), 'slOrderType': 'Market',
-            'tpOrderType': 'Market', 'slTriggerBy': 'LastPrice', 'tpTriggerBy': 'LastPrice'
-        })
+        exchange.privatePostV5PositionTradingStop({'category': 'linear', 'symbol': market_id, 'side': bybit_side, 'tpslMode': 'Full',
+            'takeProfit': str(current_tp), 'stopLoss': str(fmt_sl), 'slOrderType': 'Market', 'tpOrderType': 'Market', 'slTriggerBy': 'LastPrice', 'tpTriggerBy': 'LastPrice'})
         return fmt_sl
     except Exception: return None
 
-# ── Order Monitoring & Cleanup ─────────────────────────────────────
+# ── Order Monitoring ───────────────────────────────────────────────
 def monitor_pending_orders():
     if not pending_orders: return
     try:
         live_positions = exchange.fetch_positions()
         live_syms = {p['symbol'] for p in live_positions if float(p.get('contracts', 0)) > 0}
-
         for sym in list(pending_orders.keys()):
             if sym in live_syms:
-                # Order filled! Move to open positions
                 pos_data = pending_orders.pop(sym)
                 open_positions[sym] = pos_data
-
-                long_signal = pos_data['direction'] == 'LONG'
-                send_telegram(
-                    f"<b>✅ TRADE FILLED — APEX BEAST</b>\n"
-                    f"{'🟢 ▲ LONG' if long_signal else '🔴 ▼ SHORT'} <b>{sym.split('/')[0]}</b>\n\n"
-                    f"<b>Entry  :</b> <code>{pos_data['entry']:.6f}</code>\n"
-                    f"<b>SL     :</b> <code>{pos_data['current_sl']}</code> (1R)\n"
-                    f"<b>Target :</b> 1:2 Strict RR 🚀\n"
-                    f"<b>Risk   :</b> ${pos_data['risk_usd']:.0f}\n"
-                )
-                print(f"  ✅ Filled limit order for {sym.split('/')[0]}")
+                send_telegram(f"<b>✅ FILLED — {sym.split('/')[0]}</b>\nMode: {pos_data['mode']}\nEntry: {pos_data['entry']}\nRisk: ${pos_data['risk_usd']}")
     except Exception: pass
 
 def cancel_stale_orders():
@@ -250,16 +270,9 @@ def cancel_stale_orders():
     try:
         open_orders = exchange.fetch_open_orders()
         for order in open_orders:
-            sym = order['symbol']
-            if sym in pending_orders:
-                order_time = order['timestamp']
-                now = exchange.milliseconds()
-                
-                # 14 Minutes = 840,000 milliseconds
-                if (now - order_time) > 840000:
-                    exchange.cancel_order(order['id'], sym)
-                    pending_orders.pop(sym, None)
-                    print(f"  🗑️ 14-min Limit order expired silently for {sym.split('/')[0]}")
+            if order['symbol'] in pending_orders and (exchange.milliseconds() - order['timestamp']) > 840000:
+                exchange.cancel_order(order['id'], order['symbol'])
+                pending_orders.pop(order['symbol'], None)
     except Exception: pass
 
 def sync_open_positions():
@@ -267,184 +280,104 @@ def sync_open_positions():
     try:
         live_positions = exchange.fetch_positions()
         live_syms = {p['symbol'] for p in live_positions if float(p.get('contracts', 0)) > 0}
-        closed = [sym for sym in list(open_positions.keys()) if sym not in live_syms]
-
-        for sym in closed:
-            open_positions.pop(sym)
-            market_id = exchange.market(sym)['id']
-            try:
-                records = exchange.private_get_v5_position_closed_pnl({'category': 'linear', 'symbol': market_id, 'limit': 1}).get('result', {}).get('list', [])
-                if records:
-                    exact_pnl = float(records[0].get('closedPnl', 0.0))
-                    record_closed_pnl(exact_pnl)
-                    send_telegram(f"{'✅' if exact_pnl > 0 else '❌'} <b>TRADE CLOSED — {sym.split('/')[0]}</b>\nSettled Net PnL: <code>${exact_pnl:.2f}</code>")
-            except Exception: pass
+        for sym in list(open_positions.keys()):
+            if sym not in live_syms:
+                open_positions.pop(sym)
+                market_id = exchange.market(sym)['id']
+                recs = exchange.private_get_v5_position_closed_pnl({'category': 'linear', 'symbol': market_id, 'limit': 1}).get('result', {}).get('list', [])
+                if recs: record_closed_pnl(float(recs[0].get('closedPnl', 0.0)))
     except Exception: pass
 
-# ── Strict 1R/2R Engine ────────────────────────────────────────────
+# ── 🛡️ FEE-SAFE BREAK EVEN ENGINE ──────────────────────────────────
 def manage_trailing_stops():
     if not open_positions: return
     for symbol, pos in list(open_positions.items()):
         df = fetch_data(symbol, '1m', 5)
         if df is None or len(df) < 1: continue
+        live = float(df.iloc[-1]['close'])
+        is_l, entry, sl_dist = pos['direction'] == 'LONG', pos['entry'], pos['sl_distance']
+        best = max(pos['best_price'], float(df.iloc[-1]['high'])) if is_l else min(pos['best_price'], float(df.iloc[-1]['low']))
+        pos['best_price'] = best
+        profit_d = abs(best - entry)
 
-        live_bar = df.iloc[-1]
-        high_now, low_now, live_price = float(live_bar['high']), float(live_bar['low']), float(live_bar['close'])
-        is_long = pos['direction'] == 'LONG'
-        
-        trail_dist = 0.10 * pos['atr']
-        new_best = max(pos['best_price'], high_now) if is_long else min(pos['best_price'], low_now)
-        pos['best_price'] = new_best
-        profit_distance = abs(new_best - pos['entry'])
-        
-        one_r_dist = pos['sl_distance']
-
-        # ── 1. THE 1R FREE RIDE (Break-Even) ──
-        if profit_distance >= one_r_dist and not pos.get('free_ride_triggered', False):
+        # 1. THE FEE-SAFE FREE RIDE (Break-Even + 0.2% Profit Buffer)
+        if profit_d >= sl_dist and not pos.get('free_ride_triggered', False):
             pos['free_ride_triggered'] = True
-            be_sl = pos['entry'] * 1.001 if is_long else pos['entry'] * 0.999
-            fmt_new_sl = modify_bybit_tpsl(symbol, pos['direction'], be_sl, pos['catastrophic_tp'])
-            if fmt_new_sl:
-                pos['current_sl'] = fmt_new_sl
-                send_telegram(f"🛡️ <b>FREE RIDE SECURED (1R) — {symbol.split('/')[0]}</b>\nRisk removed. SL at Break-Even.")
+            # Move SL slightly past entry (0.002 = 0.2%) to cover fees
+            be_sl = entry * 1.002 if is_l else entry * 0.998
+            fmt_sl = modify_bybit_tpsl(symbol, pos['direction'], be_sl, pos['catastrophic_tp'])
+            if fmt_sl: 
+                pos['current_sl'] = fmt_sl
+                send_telegram(f"🛡️ <b>FEE-SAFE BE — {symbol.split('/')[0]}</b>\nSL moved to Entry + 0.2%")
 
-        # ── 2. THE 2R TARGET SQUASH & DYNAMIC TRAIL ──
-        if profit_distance >= (one_r_dist * 2.0):
-            if not pos.get('trailing_tp_triggered', False):
-                pos['trailing_tp_triggered'] = True
-                send_telegram(f"🚀 <b>2R TARGET HIT — {symbol.split('/')[0]}</b>\nStrict 1:2 RR achieved! 0.10x ATR Trail activated.")
-
-            raw_new_sl = (new_best - trail_dist) if is_long else (new_best + trail_dist)
-            sl_improved = raw_new_sl > pos['current_sl'] if is_long else raw_new_sl < pos['current_sl']
-
-            if sl_improved:
-                if (is_long and raw_new_sl >= live_price) or (not is_long and raw_new_sl <= live_price): continue
-                fmt_new_sl = modify_bybit_tpsl(symbol, pos['direction'], raw_new_sl, pos['catastrophic_tp'])
-                if fmt_new_sl:
-                    pos['current_sl'] = fmt_new_sl
-                    locked_r = abs(fmt_new_sl - pos['entry']) / one_r_dist
-                    send_telegram(f"<b>🔄 Trail Updated — {symbol.split('/')[0]}</b>\n{'▲' if is_long else '▼'} {pos['direction']}\n<b>New SL :</b> <code>{fmt_new_sl}</code>\n<b>Locked :</b> <code>{locked_r:.2f} R</code>\n")
+        # 2. THE 2R TRAIL
+        if profit_d >= (sl_dist * 2.0):
+            trail_p = (best - (0.10 * pos['atr'])) if is_l else (best + (0.10 * pos['atr']))
+            if (is_l and trail_p > pos['current_sl']) or (not is_l and trail_p < pos['current_sl']):
+                fmt_sl = modify_bybit_tpsl(symbol, pos['direction'], trail_p, pos['catastrophic_tp'])
+                if fmt_sl: pos['current_sl'] = fmt_sl
 
 def fast_management():
-    monitor_pending_orders()
-    cancel_stale_orders()
-    sync_open_positions()
-    manage_trailing_stops()
+    monitor_pending_orders(); cancel_stale_orders(); sync_open_positions(); manage_trailing_stops()
 
 # ── Signal Engine ──────────────────────────────────────────────────
 def check_signal():
     ts_now, today = datetime.now(timezone.utc), datetime.now(timezone.utc).date()
     today_pnl = daily_pnl_tracker.get(today, 0.0)
-
-    print(f"[{ts_now.strftime('%H:%M UTC')}] Beast Mode | PnL: ${today_pnl:.2f} | Pending: {len(pending_orders)} | Open: {len(open_positions)}/{MAX_CONCURRENT}")
-    if is_kill_switch_active():
-        print("  🛑 KILL-SWITCH ACTIVE.")
-        manage_trailing_stops()
-        return
-
-    scan_market_radar()
-    fast_management()
-
+    if is_kill_switch_active(): return
+    scan_market_radar(); fast_management()
     if len(open_positions) + len(pending_orders) >= MAX_CONCURRENT: return
 
     for symbol in active_watchlist:
         if symbol in open_positions or symbol in pending_orders: continue
+        
+        if symbol in approved_coins:
+            df = fetch_data(symbol, '15m', 500)
+            config = approved_coins[symbol]
+            opt_sl_m, mode = config['mult'], config['mode']
+        else:
+            df = fetch_deep_data(symbol, '15m', 6000)
+            if df is None or len(df) < 3000: continue
+            df['atr_14'] = calc_atr(df, ATR_PERIOD); df['tL'] = algoalpha_baseline(df); df = calc_smc_structure(df)
+            opt_sl_m, mode = calculate_historical_edge(df, min_trades=100)
+            if not opt_sl_m: edge_cooldowns[symbol] = time.time() + 14400; continue
+            approved_coins[symbol] = {'mult': opt_sl_m, 'mode': mode}
 
-        df = fetch_data(symbol, '15m', 250)
-        if df is None or len(df) < 150: continue
-
-        df['atr_14'] = calc_atr(df, ATR_PERIOD)
-        df['tL']     = algoalpha_baseline(df)
-        df           = calc_smc_structure(df)
-
+        df['atr_14'] = calc_atr(df, ATR_PERIOD); df['tL'] = algoalpha_baseline(df); df = calc_smc_structure(df)
         c15m, price = df.iloc[-2], float(df.iloc[-1]['close'])
-        atr, smc_trend = float(c15m['atr_14']), int(c15m['smc_trend'])
-        signal_bar_ts = int(c15m['ts'])
-        
-        if last_trade_bar.get(symbol) == signal_bar_ts or atr < (price * 0.00005) or np.isnan(atr): continue
+        atr, smc_t, bar_ts = float(c15m['atr_14']), int(c15m['smc_trend']), int(c15m['ts'])
+        if last_trade_bar.get(symbol) == bar_ts: continue
 
-        algo_long  = (float(df['tL'].iloc[-2]) > float(df['tL'].iloc[-3])) and (float(df['tL'].iloc[-3]) <= float(df['tL'].iloc[-4]))
-        algo_short = (float(df['tL'].iloc[-2]) < float(df['tL'].iloc[-3])) and (float(df['tL'].iloc[-3]) >= float(df['tL'].iloc[-4]))
+        algo_l = (float(df['tL'].iloc[-2]) > float(df['tL'].iloc[-3])) and (float(df['tL'].iloc[-3]) <= float(df['tL'].iloc[-4]))
+        algo_s = (float(df['tL'].iloc[-2]) < float(df['tL'].iloc[-3])) and (float(df['tL'].iloc[-3]) >= float(df['tL'].iloc[-4]))
 
-        long_signal  = algo_short and (smc_trend == -1)
-        short_signal = algo_long and (smc_trend == 1)
+        if mode == 'Inverted':
+            l_sig, s_sig = (algo_s and smc_t == -1), (algo_l and smc_t == 1)
+        else:
+            l_sig, s_sig = (algo_l and smc_t == 1), (algo_s and smc_t == -1)
 
-        # ─── EARLY WARNING RADAR (Live Unclosed Candle) ───
-        live_algo_long  = (float(df['tL'].iloc[-1]) > float(df['tL'].iloc[-2])) and (float(df['tL'].iloc[-2]) <= float(df['tL'].iloc[-3]))
-        live_algo_short = (float(df['tL'].iloc[-1]) < float(df['tL'].iloc[-2])) and (float(df['tL'].iloc[-2]) >= float(df['tL'].iloc[-3]))
+        if not l_sig and not s_sig: continue
         
-        # Inverted logic matches the execution parameters
-        brewing_long  = live_algo_short and (smc_trend == -1)
-        brewing_short = live_algo_long and (smc_trend == 1)
+        risk_usd = (P1_RISK if CURRENT_PHASE == 1 else P2_RISK) * (HOUSE_MONEY_MULTIPLIER if today_pnl >= HOUSE_MONEY_THRESHOLD else 1.0)
+        direction = 'LONG' if l_sig else 'SHORT'
+        sl_p = price - (opt_sl_m * atr) if l_sig else price + (opt_sl_m * atr)
+        tp_p = price + (10.0 * atr) if l_sig else price - (10.0 * atr)
+        sl_d = abs(price - sl_p)
+        lot = risk_usd / sl_d
         
-        current_15m_bar = int(df.iloc[-1]['ts'])
-        
-        if (brewing_long or brewing_short) and early_warnings.get(symbol) != current_15m_bar:
-            early_warnings[symbol] = current_15m_bar
-            dir_str = "LONG" if brewing_long else "SHORT"
-            send_telegram(
-                f"👀 <b>A+ SETUP BREWING!</b>\n"
-                f"{'🟢 ▲' if brewing_long else '🔴 ▼'} Watch <b>{symbol.split('/')[0]}</b> for an Inverted {dir_str} Trap.\n\n"
-                f"The live 15m candle is flashing the signal. Open your TradingView chart to monitor the close!"
-            )
-            print(f"  👀 [EARLY WARNING] A+ {dir_str} setup brewing on {symbol.split('/')[0]}")
-        # ──────────────────────────────────────────────────
-
-        if not long_signal and not short_signal: continue
-
-        base_risk_usd = P1_RISK if CURRENT_PHASE == 1 else P2_RISK
-        risk_usd = base_risk_usd * HOUSE_MONEY_MULTIPLIER if today_pnl >= HOUSE_MONEY_THRESHOLD else base_risk_usd
-        
-        direction = 'LONG' if long_signal else 'SHORT'
-        
-        # Initial SL distance logic (1.50x ATR multiplier)
-        raw_sl = price - (1.50 * atr) if long_signal else price + (1.50 * atr)
-        catastrophic_tp = price + 10.0 * atr if long_signal else price - 10.0 * atr
-
-        sl_distance = abs(price - raw_sl)
-        raw_lot_size = risk_usd / sl_distance if sl_distance > 0 else 0
-        
-        # Calculate Maker Fees for the fee cap check
-        if raw_lot_size * price * BYBIT_MAKER_FEE * 2 > (risk_usd * FEE_CAP_FRAC): continue
-
-        order, fmt_size, fmt_sl, fmt_tp = execute_trade(symbol, direction, raw_lot_size, price, raw_sl, catastrophic_tp)
-        if not order: continue
-
-        last_trade_bar[symbol] = signal_bar_ts
-        
-        # Save to PENDING silently
-        pending_orders[symbol] = {
-            'direction': direction, 'entry': price, 'atr': atr, 'best_price': price,
-            'current_sl': fmt_sl, 'catastrophic_tp': fmt_tp, 
-            'sl_distance': sl_distance, 
-            'free_ride_triggered': False, 'trailing_tp_triggered': False,
-            'risk_usd': risk_usd
-        }
-        
-        print(f"  ⏳ Pending Limit Order placed silently for {symbol.split('/')[0]} at {price:.6f}")
+        order, f_size, f_sl, f_tp = execute_trade(symbol, direction, lot, price, sl_p, tp_p)
+        if order:
+            last_trade_bar[symbol] = bar_ts
+            pending_orders[symbol] = {'direction': direction, 'entry': price, 'atr': atr, 'best_price': price, 'current_sl': f_sl, 
+                                      'catastrophic_tp': f_tp, 'sl_distance': sl_d, 'risk_usd': risk_usd, 'mode': mode}
 
 def daily_reset():
-    yesterday = datetime.now(timezone.utc).date()
-    final_pnl = daily_pnl_tracker.get(yesterday, 0.0)
-    send_telegram(f"<b>📅 Daily Reset</b>\nYesterday PnL: <code>${final_pnl:.2f}</code>\nKill-switch was {'🛑 ACTIVE' if final_pnl <= DAILY_KILL_SWITCH else '✅ NOT triggered'}")
-    daily_pnl_tracker.clear()
-    early_warnings.clear() # Clear warnings memory daily
+    daily_pnl_tracker.clear(); early_warnings.clear(); edge_cooldowns.clear(); approved_coins.clear()
 
 if __name__ == '__main__':
-    send_telegram(
-        f"<b>🤑 APEX BEAST V7.3 Online</b>\nContinuous Radar & Maker Orders\n\n"
-        f"Kill-Switch ${DAILY_KILL_SWITCH}/day\n"
-        "🔀 DYNAMIC 5-MIN WATCHLIST\n🔥 HOUSE MONEY ACTIVE\n"
-        "⚡ STRICT 1R FREE-RIDE / 2R TRAIL\n"
-        "👀 EARLY WARNING SYSTEM ONLINE"
-    )
-    
     check_signal()
     schedule.every(1).minutes.do(fast_management)
     schedule.every(5).minutes.at(":00").do(check_signal) 
     schedule.every().day.at("00:05").do(daily_reset)
-    
     while True:
-        try: schedule.run_pending()
-        except Exception as e: print(f"  [loop error] {e}", flush=True)
-        time.sleep(1)
+        schedule.run_pending(); time.sleep(1)
