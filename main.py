@@ -306,12 +306,12 @@ def calculate_historical_edge(df, min_trades=100):
                     stats_log = f"[WR: {wr:.1f}% | Exp: +{exp:.2f}R | PF: {pf:.2f}]"
                     
                     if wr <= 40.0: rejection_reason = f"Low WR {stats_log}"
-                    elif exp <= 0.29: rejection_reason = f"Low Exp {stats_log}"
+                    elif exp <= 0.27: rejection_reason = f"Low Exp {stats_log}"
                     elif pf <= 1.2: rejection_reason = f"Poor PF {stats_log}"
                     else: rejection_reason = f"Passed {stats_log}"
 
                 # PROFITABILITY FILTER (Exp > 0.29, WR > 40%, PF > 1.2)
-                if exp > 0.29 and wr > 40.0 and pf > 1.2 and exp > best_exp:
+                if exp > 0.27 and wr > 40.0 and pf > 1.2 and exp > best_exp:
                     best_exp, best_mult, best_mode, best_wr = exp, sl_m, mode_name, wr
                     best_roi, best_pf = roi, pf
 
