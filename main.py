@@ -126,7 +126,7 @@ def get_htf_trend(symbol):
         return "BULLISH" if df['close'].iloc[-1] > df['ema_50'].iloc[-1] else "BEARISH"
     except Exception: return "UNKNOWN"
 
-# ── 🧠 REGIME OPTIMIZER (WITH ROI & PF) ────────────────────────────
+# ── 🧠 REGIME OPTIMIZER (WITH ROI, PF & FAILURE TRACKING) ──────────
 def calculate_historical_edge(df, min_trades=50):
     df['atr'] = pd.concat([df['high'] - df['low'], (df['high'] - df['close'].shift()).abs(), (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1).ewm(span=14).mean()
     
@@ -143,6 +143,7 @@ def calculate_historical_edge(df, min_trades=50):
     
     test_multipliers = [1.50, 2.00, 2.50]
     best_mult, best_mode, best_exp, best_wr, best_pf, best_roi = None, None, 0.0, 0.0, 0.0, 0.0
+    best_overall = {'exp': -99.0, 'reason': "No valid setups found"}
     
     for mode_name, (l_sig, s_sig) in regimes.items():
         indices = df.index[l_sig | s_sig].tolist()
@@ -156,10 +157,8 @@ def calculate_historical_edge(df, min_trades=50):
                 if pd.isna(atr) or atr == 0: continue
                 sl_dist = atr * sl_m
                 cur_sl = entry - sl_dist if is_l else entry + sl_dist
-                be_price = entry * 1.002 if is_l else entry * 0.998
                 cat_tp = entry + (10.0 * atr) if is_l else entry - (10.0 * atr)
                 best_px = entry
-                be_triggered = False
                 tr_r = 0.0
                 
                 for fwd in range(idx + 1, len(df)):
@@ -168,18 +167,16 @@ def calculate_historical_edge(df, min_trades=50):
                         if l <= cur_sl: tr_r = (cur_sl - entry) / sl_dist; break
                         if h >= cat_tp: tr_r = (cat_tp - entry) / sl_dist; break
                         best_px = max(best_px, h)
-                        if (best_px - entry) >= (sl_dist * 1.5) and not be_triggered:
-                            be_triggered = True
-                            cur_sl = max(cur_sl, be_price)
-                            tr_r += 0.75  # Simulate partial scale out at 1.5R
+                        # Backtest trailing logic updated to 1:1 R -> 0.10x ATR
+                        if (best_px - entry) >= sl_dist:
+                            cur_sl = max(cur_sl, best_px - (0.10 * atr))
                     else:
                         if h >= cur_sl: tr_r = (entry - cur_sl) / sl_dist; break
                         if l <= cat_tp: tr_r = (entry - cat_tp) / sl_dist; break
                         best_px = min(best_px, l)
-                        if (entry - best_px) >= (sl_dist * 1.5) and not be_triggered:
-                            be_triggered = True
-                            cur_sl = min(cur_sl, be_price)
-                            tr_r += 0.75
+                        # Backtest trailing logic updated to 1:1 R -> 0.10x ATR
+                        if (entry - best_px) >= sl_dist:
+                            cur_sl = min(cur_sl, best_px + (0.10 * atr))
                 if tr_r != 0.0: trades.append(tr_r)
             
             if len(trades) >= min_trades:
@@ -190,11 +187,22 @@ def calculate_historical_edge(df, min_trades=50):
                 pf = gross_profit / gross_loss if gross_loss > 0 else 99.0
                 total_roi = sum(trades)
 
-                # STRICT FILTERS: 42% WR, +0.45R Exp, 1.5 PF, 20R Total
+                # Track best failed reason
+                if exp > best_overall['exp']:
+                    best_overall['exp'] = exp
+                    if exp <= 0.45: best_overall['reason'] = f"Low Exp (+{exp:.2f}R)"
+                    elif wr <= 42.0: best_overall['reason'] = f"Low WR ({wr:.1f}%)"
+                    elif pf <= 1.5: best_overall['reason'] = f"Low PF ({pf:.2f})"
+                    elif total_roi <= 20.0: best_overall['reason'] = f"Low ROI (+{total_roi:.1f}R)"
+                    else: best_overall['reason'] = "" # Passed all filters
+
+                # Approve if it passes strict filters
                 if exp > 0.45 and wr > 42.0 and pf > 1.5 and total_roi > 20.0 and exp > best_exp:
                     best_exp, best_mult, best_mode, best_wr, best_pf, best_roi = exp, sl_m, mode_name, wr, pf, total_roi
 
-    return best_mult, best_mode, best_exp, best_wr, best_roi
+    if best_exp > 0:
+        return best_mult, best_mode, best_exp, best_wr, best_roi, ""
+    return None, None, None, None, None, best_overall['reason']
 
 # ── Radar & Execution ──────────────────────────────────────────────
 def scan_market_radar():
@@ -264,14 +272,17 @@ def fast_management():
                 save_state()
                 continue
 
-        # Live Trailing & Scale Out Logic
+        # Live Trailing Logic (1:1 R -> 0.10x ATR Trail)
         for symbol, pos in list(open_positions.items()):
             df = exchange.fetch_ohlcv(symbol, '1m', limit=5)
             if not df: continue
             current_price = df[-1][4]
             is_l = pos['direction'] == 'LONG'
             entry, sl_dist = pos['entry'], pos['sl_distance']
-            diff = abs(current_price - entry)
+            
+            # Track highest/lowest price seen for accurate trailing
+            if is_l: pos['best_price'] = max(pos.get('best_price', entry), current_price)
+            else: pos['best_price'] = min(pos.get('best_price', entry), current_price)
             
             # SANITY CHECK 1: Time-Based Exit (24H / 86400s)
             if time.time() - pos.get('entry_time', time.time()) > 86400:
@@ -279,97 +290,8 @@ def fast_management():
                 send_telegram(f"⏰ <b>TIME STOP HIT: {symbol}</b> (24H elapsed)")
                 continue
 
-            # SCALE OUT: 1.5R Hits -> Sell 50%, Move SL to BE
-            if diff >= (sl_dist * 1.5) and not pos.get('scaled_out', False):
-                half_size = float(exchange.amount_to_precision(symbol, pos['size'] / 2))
-                exchange.create_market_order(symbol, 'sell' if is_l else 'buy', half_size, params={'reduceOnly': True})
-                exchange.privatePostV5PositionTradingStop({'category': 'linear', 'symbol': exchange.market(symbol)['id'], 'side': 'Buy' if is_l else 'Sell', 'tpslMode': 'Full', 'stopLoss': str(pos['be_price'])})
-                pos['scaled_out'] = True
-                pos['current_sl'] = pos['be_price']
-                save_state()
-                send_telegram(f"💰 <b>SCALE OUT SECURED: {symbol} (+1.5R)</b>\nStop moved to Break Even.")
-    except Exception: pass
-
-# ── 📡 BACKGROUND SCANNER ──────────────────────────────────────────
-def background_scanner():
-    global is_scanning
-    if is_scanning or is_kill_switch_active(): return
-    is_scanning = True
-    today_pnl = daily_pnl_tracker.get(date.today(), 0.0)
-
-    try:
-        scan_market_radar()
-        if len(open_positions) + len(pending_orders) >= MAX_CONCURRENT: return
-
-        for symbol in active_watchlist:
-            if symbol in open_positions or symbol in pending_orders: continue
-            htf_trend = get_htf_trend(symbol)
-
-            if symbol in approved_coins:
-                conf = approved_coins[symbol]
-                opt_sl_m, mode, exp, wr, roi = conf['mult'], conf['mode'], conf['exp'], conf['wr'], conf['roi']
-                print(f"  🔍 Hunting for {mode} entry on {symbol.split('/')[0]}...")
-            else:
-                df = fetch_deep_data(symbol, '15m', 3000)
-                if df is None or len(df) < 1500: continue
-                df = add_vwap(df); df = add_fvg_obv(df); df = add_squeeze(df)
-                opt_sl_m, mode, exp, wr, roi = calculate_historical_edge(df, min_trades=50)
-                
-                if not opt_sl_m: 
-                    print(f"  🚫 {symbol.split('/')[0]} FAILED: Not printing money. Burned.")
-                    edge_cooldowns[symbol] = time.time() + 3600
-                    continue
-                print(f"  🌟 {symbol.split('/')[0]} APPROVED! Mode: {mode} | SL Mult: {opt_sl_m}x | Exp: +{exp:.2f}R")
-                approved_coins[symbol] = {'mult': opt_sl_m, 'mode': mode, 'exp': exp, 'wr': wr, 'roi': roi}
-
-            # Live Candle Check
-            df = fetch_deep_data(symbol, '15m', 50)
-            if df is None: continue
-            df = add_vwap(df); df = add_fvg_obv(df); df = add_squeeze(df)
-            
-            c15m = df.iloc[-2]
-            price = float(df.iloc[-1]['close'])
-            atr = float(df['high'].iloc[-14:] - df['low'].iloc[-14:]).mean() # Simplified live ATR
-            
-            l_sig, s_sig = False, False
-            if 'FVG' in mode: l_sig, s_sig = c15m['fvg_bull'] and price > c15m['daily_vwap'], c15m['fvg_bear'] and price < c15m['daily_vwap']
-            elif 'OBV' in mode: l_sig, s_sig = c15m['obv'] > c15m['obv_ema'] and price > c15m['daily_vwap'], c15m['obv'] < c15m['obv_ema'] and price < c15m['daily_vwap']
-            elif 'Squeeze' in mode: l_sig, s_sig = c15m['squeeze_on'] and price > c15m['daily_vwap'], c15m['squeeze_on'] and price < c15m['daily_vwap']
-
-            # HTF God Mode Filter
-            if htf_trend == "BEARISH": l_sig = False
-            if htf_trend == "BULLISH": s_sig = False
-
-            if not l_sig and not s_sig: continue
-            
-            risk = (P1_RISK if CURRENT_PHASE == 1 else P2_RISK) * (HOUSE_MONEY_MULTIPLIER if today_pnl >= HOUSE_MONEY_THRESHOLD else 1.0)
-            direction = 'LONG' if l_sig else 'SHORT'
-            sl_p = price - (opt_sl_m * atr) if l_sig else price + (opt_sl_m * atr)
-            tp_p = price + (10.0 * atr) if l_sig else price - (10.0 * atr)
-            sl_d = abs(price - sl_p)
-            
-            order, f_size, f_sl, f_tp = execute_trade(symbol, direction, risk / sl_d, price, sl_p, tp_p)
-            if order:
-                pending_orders[symbol] = {'direction': direction, 'entry': price, 'size': f_size, 'atr': atr, 'opt_sl_m': opt_sl_m,
-                                          'current_sl': f_sl, 'sl_distance': sl_d, 'be_price': price * 1.002 if l_sig else price * 0.998, 
-                                          'mode': mode, 'win_rate': wr, 'expectancy': exp, 'roi': roi, 'entry_time': time.time()}
-                save_state()
-    except Exception: pass
-    finally: is_scanning = False
-
-def trigger_scanner():
-    threading.Thread(target=background_scanner).start()
-
-# ── Main Loop ──────────────────────────────────────────────────────
-if __name__ == '__main__':
-    load_state()
-    send_telegram("🤖 <b>Apex Beast V8.1 is ONLINE</b>\n📡 Scanning Top 15 Coins...\n📊 Volume Surge & Hunter Logs: Active")
-    
-    trigger_scanner() 
-    schedule.every(1).minutes.do(fast_management)            
-    schedule.every(15).minutes.at(":00").do(trigger_scanner) 
-    schedule.every().day.at("00:05").do(lambda: (daily_pnl_tracker.clear(), approved_coins.clear(), edge_cooldowns.clear()))
-    
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+            # NEW LOGIC: Trailing Stop at 1:1 RR distance
+            diff = abs(pos['best_price'] - entry)
+            if diff >= sl_dist:
+                if is_l:
+                    trail_sl = pos['best_price'] - (0.10 * pos
