@@ -41,6 +41,7 @@ open_positions       = {}
 pending_orders       = {}  
 early_warnings       = {}  
 daily_pnl_tracker    = {}
+daily_trade_stats    = {'total_trades': 0, 'wins': 0, 'coin_pnl': {}} # EOD Tracking
 last_trade_bar       = {}  
 active_watchlist     = []
 
@@ -66,9 +67,46 @@ def send_telegram(text):
 def is_kill_switch_active() -> bool:
     return daily_pnl_tracker.get(date.today(), 0.0) <= DAILY_KILL_SWITCH
 
-def record_closed_pnl(pnl_usd: float):
+def record_closed_pnl(symbol: str, pnl_usd: float):
     today = date.today()
     daily_pnl_tracker[today] = daily_pnl_tracker.get(today, 0.0) + pnl_usd
+    
+    # EOD Tracking
+    base_coin = symbol.split('/')[0]
+    daily_trade_stats['total_trades'] += 1
+    if pnl_usd > 0:
+        daily_trade_stats['wins'] += 1
+    daily_trade_stats['coin_pnl'][base_coin] = daily_trade_stats['coin_pnl'].get(base_coin, 0.0) + pnl_usd
+
+def send_eod_summary():
+    today = date.today()
+    total_pnl = daily_pnl_tracker.get(today, 0.0)
+    trades = daily_trade_stats['total_trades']
+    wins = daily_trade_stats['wins']
+    wr = (wins / trades * 100) if trades > 0 else 0.0
+    
+    best_coin = "None"
+    best_coin_pnl = 0.0
+    if daily_trade_stats['coin_pnl']:
+        best_coin = max(daily_trade_stats['coin_pnl'], key=daily_trade_stats['coin_pnl'].get)
+        best_coin_pnl = daily_trade_stats['coin_pnl'][best_coin]
+    
+    emoji = "🟢" if total_pnl >= 0 else "🔴"
+    msg = (f"📅 <b>EOD SUMMARY ({today})</b>\n"
+           f"{emoji} Total PnL: {total_pnl:+.2f} USD\n"
+           f"📊 Win Rate: {wr:.1f}%\n"
+           f"🔢 Total Trades: {trades}\n"
+           f"🏆 Best Coin: {best_coin} ({best_coin_pnl:+.2f} USD)")
+    
+    send_telegram(msg)
+    
+    # Clear stats for the new day
+    daily_pnl_tracker.clear()
+    daily_trade_stats['total_trades'] = 0
+    daily_trade_stats['wins'] = 0
+    daily_trade_stats['coin_pnl'].clear()
+    approved_coins.clear()
+    edge_cooldowns.clear()
 
 # ── 🧠 CONTINUOUS MARKET RADAR (Liquid Momentum Upgrade) ───────────
 def scan_market_radar():
@@ -262,15 +300,18 @@ def calculate_historical_edge(df, min_trades=100):
                 gross_loss = abs(sum(t for t in trades if t < 0))
                 pf = gross_profit / gross_loss if gross_loss != 0 else gross_profit
 
+                # 0.29 Expectancy update & WR/PF Logging
                 if exp > highest_exp:
                     highest_exp = exp
-                    if wr <= 40.0: rejection_reason = f"Low WR ({wr:.1f}%)"
-                    elif exp <= 0.35: rejection_reason = f"Negative/Low Exp (+{exp:.2f}R)"
-                    elif pf <= 1.2: rejection_reason = f"Poor Profit Factor ({pf:.2f})"
-                    else: rejection_reason = "Passed"
+                    stats_log = f"[WR: {wr:.1f}% | Exp: +{exp:.2f}R | PF: {pf:.2f}]"
+                    
+                    if wr <= 40.0: rejection_reason = f"Low WR {stats_log}"
+                    elif exp <= 0.29: rejection_reason = f"Low Exp {stats_log}"
+                    elif pf <= 1.2: rejection_reason = f"Poor PF {stats_log}"
+                    else: rejection_reason = f"Passed {stats_log}"
 
-                # PROFITABILITY FILTER (Exp > 0.35, WR > 40%, PF > 1.2)
-                if exp > 0.35 and wr > 40.0 and pf > 1.2 and exp > best_exp:
+                # PROFITABILITY FILTER (Exp > 0.29, WR > 40%, PF > 1.2)
+                if exp > 0.29 and wr > 40.0 and pf > 1.2 and exp > best_exp:
                     best_exp, best_mult, best_mode, best_wr = exp, sl_m, mode_name, wr
                     best_roi, best_pf = roi, pf
 
@@ -352,7 +393,7 @@ def fast_management():
                 recs = exchange.private_get_v5_position_closed_pnl({'category': 'linear', 'symbol': exchange.market(sym)['id'], 'limit': 1}).get('result', {}).get('list', [])
                 if recs:
                     pnl = float(recs[0].get('closedPnl', 0.0))
-                    record_closed_pnl(pnl)
+                    record_closed_pnl(sym, pnl)
                     emoji = "💰" if pnl > 0 else "🩸"
                     send_telegram(f"{emoji} <b>TRADE SETTLED: {sym.split('/')[0]}</b>\nOutcome: {pnl:+.2f} USD")
 
@@ -407,7 +448,7 @@ def check_signal():
                 print(f"  🚫 {symbol.split('/')[0]} REJECTED: {reason}. Burned.")
                 edge_cooldowns[symbol] = time.time() + 3600
                 continue
-            print(f"  🌟 {symbol.split('/')[0]} APPROVED! Mode: {mode} | SL: {opt_sl_m}x | Exp: +{exp:.2f}R | ROI: +{roi:.2f}R | PF: {pf:.2f}")
+            print(f"  🌟 {symbol.split('/')[0]} APPROVED! Mode: {mode} | SL: {opt_sl_m}x | WR: {wr:.1f}% | Exp: +{exp:.2f}R | ROI: +{roi:.2f}R | PF: {pf:.2f}")
             approved_coins[symbol] = {'mult': opt_sl_m, 'mode': mode, 'exp': exp, 'wr': wr, 'roi': roi, 'pf': pf}
 
         df['atr_14'] = calc_atr(df, ATR_PERIOD)
@@ -471,7 +512,7 @@ if __name__ == '__main__':
     check_signal()
     schedule.every(30).seconds.do(fast_management)
     schedule.every(5).minutes.at(":00").do(check_signal) 
-    schedule.every().day.at("00:05").do(lambda: (daily_pnl_tracker.clear(), approved_coins.clear(), edge_cooldowns.clear()))
+    schedule.every().day.at("00:05").do(send_eod_summary)
     while True:
         schedule.run_pending()
         time.sleep(1)
