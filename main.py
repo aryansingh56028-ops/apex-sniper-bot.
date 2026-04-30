@@ -24,10 +24,18 @@ FEE_CAP_FRAC      = 0.40
 # 🔥 HOUSE MONEY & RADAR CONFIG (NET WIDENED)
 HOUSE_MONEY_THRESHOLD  = 60.0  
 HOUSE_MONEY_MULTIPLIER = 1.5   
-RADAR_MIN_VOLUME       = 25000000  # Dropped to 25M to find more movers
-RADAR_TOP_COINS        = 50        # Increased to 50 to widen the net
+RADAR_MIN_VOLUME       = 25000000  
+RADAR_TOP_COINS        = 50        
 P1_RISK = 25.0                     
 P2_RISK = 25.0
+
+# 🛑 CRYPTO-ONLY BLOCKLIST
+# Prevents the bot from trading Metals, Energy, Forex, and Global Indices on Bybit
+NON_CRYPTO_BLOCKLIST = {
+    'XAU', 'XAG', 'WTI', 'BRENT', 'COPPER', 'PLAT', 'PALLADIUM', 
+    'EUR', 'GBP', 'JPY', 'CHF', 'AUD', 'NZD', 'CAD', 'SGD',
+    'US30', 'US100', 'US500', 'UK100', 'DE40', 'NI225', 'HK50', 'EU50'
+}
 
 # ── AlgoAlpha Indicator Constants ─────────────────────────────────
 ST_FACTOR  = 2.0    
@@ -119,6 +127,11 @@ def scan_market_radar():
         valid_coins = []
         for symbol, data in tickers.items():
             if not symbol.endswith(':USDT'): continue
+            
+            # 👉 NEW: Apply Blocklist
+            base_coin = symbol.split('/')[0]
+            if base_coin in NON_CRYPTO_BLOCKLIST: continue
+            
             if symbol in edge_cooldowns: continue 
             
             qv = float(data.get('quoteVolume', 0))
@@ -137,7 +150,7 @@ def scan_market_radar():
         
         global active_watchlist
         active_watchlist = [c['symbol'] for c in top_liquid_50[:RADAR_TOP_COINS]]
-        print(f"🎯 [RADAR LOCK] Liquid Targets: {[s.split('/')[0] for s in active_watchlist]}")
+        print(f"🎯 [RADAR LOCK] Crypto Targets: {[s.split('/')[0] for s in active_watchlist]}")
     except Exception as e: 
         print(f"Radar Error: {e}")
 
@@ -243,32 +256,25 @@ def calc_ict(df, holding=12):
     df['recent_fvg_bear'] = df['fvg_bear'].astype(int).rolling(holding).max().fillna(0)
     return df
 
-# 👉 NEW: Scott Taylor Market Sessions & Manipulation Tracker
 def calc_sessions(df):
     df['datetime'] = pd.to_datetime(df['ts'], unit='ms')
     df['hour'] = df['datetime'].dt.hour
     df['minute'] = df['datetime'].dt.minute
     
-    # 1. Identify first 15m candle of London (07:00 UTC) and NY (13:00 UTC)
     is_london_open = (df['hour'] == 7) & (df['minute'] == 0)
     is_ny_open = (df['hour'] == 13) & (df['minute'] == 0)
     
-    # 2. Extract highs and lows of the opening range
     df['or_high'] = np.where(is_london_open | is_ny_open, df['high'], np.nan)
     df['or_low'] = np.where(is_london_open | is_ny_open, df['low'], np.nan)
     
-    # Forward fill the opening range throughout the active session
     df['or_high'] = pd.Series(df['or_high']).ffill()
     df['or_low'] = pd.Series(df['or_low']).ffill()
     
-    # 3. Define active session windows (London/NY overlap & active hours)
     df['is_active_session'] = df['hour'].isin([7, 8, 9, 10, 13, 14, 15, 16])
     
-    # 4. Manipulation / Raid: Price sweeps above/below OR bounds, traps retail, and closes inside
     df['sweep_or_low'] = (df['low'] < df['or_low']) & (df['close'] > df['or_low']) & df['is_active_session']
     df['sweep_or_high'] = (df['high'] > df['or_high']) & (df['close'] < df['or_high']) & df['is_active_session']
     
-    # 5. Rolling memory of the sweep for the Retest entry
     df['recent_or_sweep_low'] = df['sweep_or_low'].rolling(12).max().fillna(0)
     df['recent_or_sweep_high'] = df['sweep_or_high'].rolling(12).max().fillna(0)
     
@@ -301,7 +307,6 @@ def calculate_historical_edge(df, min_trades=75):
     regimes['Regime 5 (Beast: SMC + MACD 24/7)'] = (b_long, b_short)
     regimes['Regime 6 (Beast: SMC + MACD Time Window)'] = (b_long & df['in_window'].shift(1), b_short & df['in_window'].shift(1))
 
-    # 👉 NEW: Regime 7 (ICT ORB Manipulation + FVG Retest)
     orb_l = (df['recent_or_sweep_low'].shift(1) > 0) & (df['recent_mss_bull'].shift(1) > 0) & (df['recent_fvg_bull'].shift(1) > 0) & (close > df['ema_100'].shift(1)) & df['is_active_session'].shift(1)
     orb_s = (df['recent_or_sweep_high'].shift(1) > 0) & (df['recent_mss_bear'].shift(1) > 0) & (df['recent_fvg_bear'].shift(1) > 0) & (close < df['ema_100'].shift(1)) & df['is_active_session'].shift(1)
     regimes['Regime 7 (ICT: ORB + FVG Retest)'] = (orb_l, orb_s)
@@ -451,7 +456,6 @@ def check_signal():
         df = calc_smc_structure(df)
         df['rsi_14'] = calc_rsi(df['close'])
         
-        # 👉 ADDED 100 EMA TO TOOLKIT ARRAY
         for e in [9, 15, 20, 21, 50, 100, 200]: df[f'ema_{e}'] = df['close'].ewm(span=e, adjust=False).mean()
         
         df = calc_sweeps(df); df = calc_fvg(df); df = calc_ict(df); df = calc_macd(df); df = calc_sessions(df)
@@ -470,13 +474,9 @@ def check_signal():
         volume_surge = float(c15m['volume']) > (float(c15m['vol_ma']) * 1.1)
         if not volume_surge: continue
 
-        # The Live execution signal generation logic handles standard regimes.
-        # Since Regime 7 uses deep historical logic, the simplest robust way to execute
-        # live is to let the bot recalculate the exact boolean flags for the current candle.
         algo_l = (float(df['tL'].iloc[-2]) > float(df['tL'].iloc[-3]))
-        direction = 'LONG' if algo_l else 'SHORT' # Fallback default
+        direction = 'LONG' if algo_l else 'SHORT' 
         
-        # Override live direction dynamically if the regime is Beast or ICT ORB
         if 'Regime 5' in mode or 'Regime 6' in mode:
             b_l = (float(df['recent_sweep_lod'].iloc[-2]) > 0) and (float(df['recent_mss_bull'].iloc[-2]) > 0) and (float(df['recent_fvg_bull'].iloc[-2]) > 0) and (float(df['close'].iloc[-2]) > float(df['ema_20'].iloc[-2])) and (float(df['macd_flip_bull'].iloc[-2]))
             direction = 'LONG' if b_l else 'SHORT'
@@ -499,7 +499,7 @@ def check_signal():
 def run_threaded(job_func): threading.Thread(target=job_func).start()
 
 if __name__ == '__main__':
-    send_telegram("🤖 <b>Apex Beast V8.3 ONLINE</b>\n📡 Regimes: 7 Active (ORB + ICT Added)\n📊 Trend Filter: 100 EMA | 2:1 RR")
+    send_telegram("🤖 <b>Apex Beast V8.4 (Crypto Only) ONLINE</b>\n📡 Target: Top 50 Cryptos\n🛑 Blocklist: Metals, Indices & Forex Disabled")
     threading.Thread(target=check_signal).start()
     schedule.every(30).seconds.do(fast_management)
     schedule.every(15).minutes.at(":00").do(run_threaded, check_signal) 
